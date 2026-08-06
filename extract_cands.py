@@ -492,12 +492,10 @@ def main():
                      help='plot the diagnostic png at the native extracted time '
                           'resolution instead of scrunching to the search resolution '
                           '(useful with a finer --digifil-fft)')
-    ap.add_argument('--digifil-min-block', '--df-min-block', type=float, default=6.0,
+    ap.add_argument('--digifil-min-block', '--df-min-block', type=float, default=0.5,
                      help='minimum duration (s) to request from digifil per call. The '
                           'desired small window is trimmed out client-side afterward. '
-                          'Values below 2.0s are clamped up: digifil HANGS on -T shorter '
-                          'than ~1.5s when forming a filterbank from voltages (verified '
-                          '-F 16..128).')
+                          'Values below 0.5s are clamped up: digifil HANGS on -T shorter')
     ap.add_argument('--keep-fil', action='store_true',
                      help='keep the intermediate .fil cutout (deleted by default once .npz is saved)')
     ap.add_argument('--plot', action='store_true',
