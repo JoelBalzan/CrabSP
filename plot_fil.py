@@ -1,12 +1,13 @@
-from sigpyproc.readers import FilReader
+import argparse
+
 import matplotlib.pyplot as plt
 import numpy as np
-import argparse
+from sigpyproc.readers import FilReader
 
 parser = argparse.ArgumentParser()
 parser.add_argument("filename")
 parser.add_argument(
-    "--tscrunch",
+    "--ts",
     type=int,
     default=1,
     help="Number of time samples to average together (default: 1)"
@@ -30,7 +31,7 @@ if arr.shape[0] == fil.header.nchans:
 arr = arr - np.median(arr, axis=0, keepdims=True)
 
 # Time scrunch
-tscrunch = args.tscrunch
+tscrunch = args.ts
 if tscrunch > 1:
     ntime = arr.shape[0] // tscrunch
     arr = arr[:ntime * tscrunch]

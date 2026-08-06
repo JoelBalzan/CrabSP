@@ -66,7 +66,8 @@ python3 extract_cands.py \
    (`--width-factor 10`, floored at `--min-window` 5 ms) plus the dispersive
    smear across the band at the candidate DM.
 4. **digifil extraction** — forming a filterbank on the fly from voltages
-   (`-F 32`) discards FFT settle/edge regions, so very short requests return
+   (with `-F`, see [time resolution](#time-resolution-digifil-fft)) discards
+   FFT settle/edge regions, so very short requests return
    zero samples. To work around this a block of at least `--digifil-min-block`
    (default 6 s) is requested centred on the pulse, with full coherency
    products (`-d 4`), coherent dedispersion at the candidate DM (`-D ... -K`),
@@ -95,9 +96,10 @@ Each `.npz` contains:
 | `window_s`       | requested cutout window (s)                           |
 | `digifil_seek_s`, `digifil_dur_s` | digifil block actually requested   |
 
-`--plot` additionally writes a diagnostic PNG per candidate (bandpass-subtracted
-Stokes-I dynamic spectrum plus I/Q/U/V time series), scrunched to the search
-resolution of the candidate file.
+`--plot` additionally writes a diagnostic PNG per candidate (full-Stokes profile,
+bandpass-subtracted Stokes-I dynamic spectrum plus Q/U/V time series), scrunched
+to the search resolution of the candidate file. `--plot-no-tscrunch` keeps the
+native extracted resolution instead.
 
 ### Options
 
@@ -113,16 +115,34 @@ resolution of the candidate file.
 | `--max-window S` | `None` | cap on the cutout window (s) |
 | `--digifil-min-block S` | `6.0` | min duration to request from digifil (see note above) |
 | `--digifil-bin` | `digifil` | path to the digifil binary |
+| `--digifil-fft` | `32` | digifil `-F`, number of channels; sets cutout time resolution (see below) |
+| `--plot-tscrunch-us US` | search res | override the diagnostic-PNG time scrunch (µs) |
+| `--plot-no-tscrunch` | off | plot PNGs at the native extracted resolution |
 | `--keep-fil` | off | keep the intermediate `.fil` cutout |
 | `--plot` | off | write a diagnostic PNG per candidate |
+
+### Time resolution (`--digifil-fft`)
+
+The cutout time resolution is set by digifil's FFT factor `-F`. For the 32 MHz
+band used in `tx.sh`, `-F 32` produces 32 × 1 MHz channels at 1 µs raw `dt`.
+Increase `-F` (64, 128, …) for finer time resolution:
+
+```bash
+python3 extract_cands.py --cand-dir cands --workdir . --digifil-fft 128 --plot
+```
+
+This is independent of the transientX search resolution (which only sets the
+window sizes and the default plot scrunch); the saved `.npz` metadata and the
+plotting always follow the header of the actual cutout. Use
+`--plot-no-tscrunch` to view the finer native resolution in the diagnostic PNGs.
 
 ## Helper — `plot_fil.py`
 
 Quick look at a filterbank: dynamic spectrum (bandpass-subtracted) and total
-power profile.
+power profile. --ts 4 = 
 
 ```bash
-python3 plot_fil.py cutouts/cand123_..._iquv.fil --tscrunch 4
+python3 plot_fil.py cutouts/cand123_..._iquv.fil --ts 4
 ```
 
 ## Typical workflow

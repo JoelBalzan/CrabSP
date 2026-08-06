@@ -52,15 +52,56 @@ def build_fragment_index(workdir):
         t_end = h['tstart_mjd'] + h['obslen_s'] / 86400.0
         frags.append({'dada_path': dada_path, 'fil_path': fil, **h, 't_end_mjd': t_end})
     frags.sort(key=lambda f: f['tstart_mjd'])
-    return frags
+    if not frags:
+        return frags, None
+    # transientX timestamps every candidate in a continuous-search reference
+    # frame rooted at the FIRST searched file's tstart (that tstart is literally
+    # in the .cands filename). So a burst in the N-th searched fragment is
+    # reported ~sum(durations of files 0..N-1) too early in absolute MJD, and
+    # naive absolute-MJD matching fails for any fragment after the first.
+    # Precompute where each fragment starts within that stream.
+    cum = 0.0
+    for f in frags:
+        f['stream_start_s'] = cum
+        cum += f['obslen_s']
+    return frags, frags[0]['tstart_mjd']
 
 
-def find_fragment(frags, mjd, tol_s=0.01):
+def find_fragment(frags, stream_root, mjd, tol_s=0.01):
+    """Locate the searched fragment containing a candidate.
+
+    Primary: continuous-stream matching.  global_s = (mjd - stream_root)*86400
+    is walked through the fragments cumulatively; the local offset within the
+    matching fragment is returned.  Fallback: absolute-MJD matching for cands
+    files (e.g. hand-made) that already carry absolute timestamps.
+
+    Returns (frag, offset_within_frag_s) or (None, None).
+    """
+    if stream_root is not None:
+        global_s = (mjd - stream_root) * 86400.0
+        if global_s >= 0:
+            for f in frags:
+                if f['stream_start_s'] <= global_s < f['stream_start_s'] + f['obslen_s']:
+                    return f, global_s - f['stream_start_s']
     tol_days = tol_s / 86400.0
     for f in frags:
         if f['tstart_mjd'] - tol_days <= mjd < f['t_end_mjd'] + tol_days:
-            return f
-    return None
+            return f, (mjd - f['tstart_mjd']) * 86400.0
+    return None, None
+
+
+def is_burst_duplicate(mjd, seen_mjds, tol_s=0.001):
+    """True if a candidate with an MJD within tol_s has already been extracted.
+
+    transientX reports the same burst at several neighbouring trial DMs, each
+    with a slightly different peak MJD (the dispersive delay moves the peak by
+    ~0.2 ms per 0.05 DM here). Those are one physical event, so dedup on the
+    burst time rather than the exact MJD / offset.
+    """
+    for prev in seen_mjds:
+        if abs(mjd - prev) * 86400.0 <= tol_s:
+            return True
+    return False
 
 
 # --------------------------------------------------------------------------
@@ -108,18 +149,28 @@ def digifil_extraction_span(offset_s, frag, min_block_s=6.0):
     """
     Forming a filterbank on-the-fly from voltages (-F) requires an FFT with a
     settle/edge region discarded on each side to avoid convolution artifacts.
-    For short -T requests, the whole window can fall inside that discarded
-    edge, producing zero valid output samples regardless of -B/-overlap
-    tuning (confirmed: a 6s request works cleanly, everything <=20ms failed
-    across every block-size/overlap/rescale combination tried). Work around
-    this by requesting a block >= min_block_s (clipped to the fragment's
-    duration), centred on the candidate, and trimming to the desired small
-    window client-side after reading the data back.
+    For short -T requests the whole window can fall inside that discarded edge,
+    producing zero valid output samples — and, worse, requests below ~1.5 s
+    HANG digifil entirely (confirmed: -T 2.0 works for every -F from 16 to 128,
+    -T <= 1.2 never finishes). Work around this by always requesting a block
+    >= SAFE_MIN_BLOCK_S (clipped to the fragment's duration), centred on the
+    candidate, and trimming to the desired small window client-side after
+    reading the data back.
 
     Returns (seek_s, duration_s) to pass to digifil.
     """
+    SAFE_MIN_BLOCK_S = 0.5
     frag_dur_s = frag['nsamp'] * frag['tsamp_s']
-    block_s = min(min_block_s, frag_dur_s)  # can't exceed the fragment itself
+
+    block_s = max(min_block_s, SAFE_MIN_BLOCK_S)
+    if block_s > frag_dur_s:
+        if min_block_s < SAFE_MIN_BLOCK_S:
+            print(f"    [warning] fragment is only {frag_dur_s:.2f}s long — shorter than the "
+                  f"safe digifil block {SAFE_MIN_BLOCK_S}s; this run may hang")
+        block_s = frag_dur_s
+    elif min_block_s < SAFE_MIN_BLOCK_S:
+        print(f"    [warning] requested digifil block {min_block_s}s is below the safe "
+              f"minimum {SAFE_MIN_BLOCK_S}s (shorter -T hangs digifil); using {block_s:.2f}s")
 
     seek_s = offset_s - block_s / 2.0
     seek_s = max(0.0, min(seek_s, frag_dur_s - block_s))
@@ -148,7 +199,7 @@ def trim_to_window(stokes, block_tstart_mjd, tsamp_s, cand_mjd, window_s):
 
 
 def extract_cutout(dada_path, offset_s, window_s, dm, outname, outdir,
-                    digifil_bin='digifil', nbits=-32):
+                    digifil_bin='digifil', nbits=-32, fft=32):
     outdir.mkdir(parents=True, exist_ok=True)
     out_fil = outdir / f"{outname}.fil"
     if out_fil.exists():
@@ -157,7 +208,9 @@ def extract_cutout(dada_path, offset_s, window_s, dm, outname, outdir,
         digifil_bin,
         '-S', f'{max(offset_s, 0):.6f}',
         '-T', f'{window_s:.6f}',
-        '-F', '32',
+        '-F', str(fft),  # FFT factor -> number of channels, sets the time
+                          # resolution: with a 32 MHz band, -F 32 gives 32 x 1 MHz
+                          # channels and 1 us raw dt; larger -F -> finer dt
         '-d', '4',         # npol=4 -> PP,QQ,PQ,QP coherency products
         '-D', f'{dm:.4f}',  # DM value to use for dedispersion
         '-K',                # actually remove inter-channel dispersion delays
@@ -173,12 +226,22 @@ def extract_cutout(dada_path, offset_s, window_s, dm, outname, outdir,
     ]
     print("\nRunning digifil")
     print(" ".join(cmd))
-    r = subprocess.run(cmd, capture_output=True, text=True)
+    # Don't capture output: digifil writes a \r progress bar to stderr and
+    # capturing it hides all progress (looks like a 10-minute freeze). The
+    # timeout is a safety net for the known short--T hang.
+    timeout_s = max(120.0, 15.0 * (offset_s + window_s))
+    try:
+        r = subprocess.run(cmd, timeout=timeout_s)
+    except subprocess.TimeoutExpired:
+        print(f"    digifil TIMED OUT after {timeout_s:.0f}s "
+              f"(seek={offset_s:.2f}s + dur={window_s:.2f}s) — this is the known "
+              f"short--T hang; keep --digifil-min-block >= 2.0s")
+        return None
     if r.returncode != 0:
-        print('    digifil FAILED:', r.stderr[-2000:])
+        print(f'    digifil FAILED (rc={r.returncode}); re-run the printed command manually to see the error')
         return None
     if not out_fil.exists() or out_fil.stat().st_size == 0:
-        print(f'    digifil exited 0 but wrote no data (blocksize/seek mismatch?): {r.stdout[-1000:]}')
+        print('    digifil exited 0 but wrote no data (blocksize/seek mismatch?)')
         return None
     return out_fil
 
@@ -277,6 +340,11 @@ def coherency_to_stokes(cube):
 # Diagnostic plotting
 # --------------------------------------------------------------------------
 
+def debiased_L(Q_ts, U_ts, sigma):
+    """Ricean-debiased linear polarisation profile (Wardle & Kronberg 1974)."""
+    return np.sqrt(np.maximum(Q_ts ** 2 + U_ts ** 2 - sigma ** 2, 0.0))
+
+
 def plot_diagnostic(stokes, tsamp_s, f1_mhz, bw_mhz, nchan, outpath, title='', tscrunch_us=None):
     import matplotlib
     matplotlib.use('Agg')
@@ -286,26 +354,17 @@ def plot_diagnostic(stokes, tsamp_s, f1_mhz, bw_mhz, nchan, outpath, title='', t
 
     if tscrunch_us is not None:
         target_tsamp = tscrunch_us * 1e-6
-    
+
         factor = int(round(target_tsamp / tsamp_s))
-    
+
         if factor > 1:
             nsamp = I.shape[-1]
             ntrim = nsamp - (nsamp // factor) * factor
-    
-            if ntrim:
-                I = I[..., :-ntrim]
-                Q = Q[..., :-ntrim]
-                U = U[..., :-ntrim]
-                V = V[..., :-ntrim]
-    
-            newshape = (4, I.shape[0], -1, factor)
-    
-            stokes = np.stack([I, Q, U, V])
-            stokes = stokes.reshape(newshape).mean(axis=-1)
-    
+
+            stokes = stokes[..., :-ntrim] if ntrim else stokes
+            stokes = stokes.reshape(4, stokes.shape[1], -1, factor).mean(axis=-1)
             I, Q, U, V = stokes
-    
+
             tsamp_s *= factor
 
     nsamp = I.shape[-1]
@@ -315,28 +374,64 @@ def plot_diagnostic(stokes, tsamp_s, f1_mhz, bw_mhz, nchan, outpath, title='', t
     # Per-channel baseline (bandpass) subtraction — without this, static
     # per-channel gain dominates both the image and the summed profile and
     # buries a weak (SNR~5) pulse entirely. Matches the approach in plot.py.
-    I_bp = I - np.median(I, axis=1, keepdims=True)
+    def bp(a):
+        return a - np.median(a, axis=1, keepdims=True)
 
-    fig, axes = plt.subplots(5, 1, figsize=(7, 10), sharex=True,
-                              gridspec_kw={'height_ratios': [2, 1, 1, 1, 1]})
+    I_bp, Q_bp, U_bp, V_bp = bp(I), bp(Q), bp(U), bp(V)
 
+    # Frequency-summed time series of every Stokes parameter.
+    I_ts = np.nansum(I_bp, axis=0)
+    Q_ts = np.nansum(Q_bp, axis=0)
+    U_ts = np.nansum(U_bp, axis=0)
+    V_ts = np.nansum(V_bp, axis=0)
+
+    # Off-pulse noise estimate (samples below the median I level) used for the
+    # Ricean debias of the linear-polarisation profile.
+    off_mask = I_ts < np.median(I_ts)
+    if off_mask.sum() > 10:
+        sigma_L = np.hypot(Q_ts[off_mask].std(), U_ts[off_mask].std()) / np.sqrt(2)
+    else:
+        sigma_L = 0.0
+    L_ts = debiased_L(Q_ts, U_ts, sigma_L)
+
+    fig, axes = plt.subplots(4, 1, figsize=(8, 11), sharex=True,
+                             gridspec_kw={'height_ratios': [1.6, 2.4, 1, 1]})
+
+    colors = {'I': 'k', 'L': 'crimson', 'Q': 'darkorange', 'U': 'seagreen', 'V': 'royalblue'}
+
+    # --- Top: total-intensity profile with debiased linear polarisation ---
     ax = axes[0]
+    ax.plot(t_ms, I_ts, lw=0.9, c=colors['I'], label='I')
+    ax.plot(t_ms, L_ts, lw=0.9, c=colors['L'], label=r'$L_{\rm deb}$')
+    ax.axhline(0, color='k', lw=0.5, alpha=0.3)
+    ax.set_ylabel('I, L')
+    ax.legend(frameon=False, fontsize=8, loc='upper right')
+    ax.set_title(title or 'Stokes I profile (bandpass-subtracted)')
+
+    # --- Dynamic spectrum of Stokes I ---
+    ax = axes[1]
     vmin, vmax = np.percentile(I_bp, [5, 99.5])
     im = ax.imshow(I_bp, aspect='auto', origin='upper',
-                    extent=[t_ms[0], t_ms[-1], freqs[-1], freqs[0]],
-                    cmap='viridis', vmin=vmin, vmax=vmax)
+                   extent=[t_ms[0], t_ms[-1], freqs[-1], freqs[0]],
+                   cmap='viridis', vmin=vmin, vmax=vmax)
     ax.set_ylabel('Freq (MHz)')
-    ax.set_title(title or 'Stokes I dynamic spectrum (bandpass-subtracted)')
 
-    labels = ['I', 'Q', 'U', 'V']
-    for ax, arr, lab in zip(axes[1:], stokes, labels):
-        arr_bp = arr - np.median(arr, axis=1, keepdims=True)
-        ts = np.nansum(arr_bp, axis=0)
-        ax.plot(t_ms, ts, lw=0.8)
-        ax.set_ylabel(lab)
-        ax.axhline(0, color='k', lw=0.5, alpha=0.3)
+    # --- Q and U in distinct colours ---
+    ax = axes[2]
+    ax.plot(t_ms, Q_ts, lw=0.9, c=colors['Q'], label='Q')
+    ax.plot(t_ms, U_ts, lw=0.9, c=colors['U'], label='U')
+    ax.axhline(0, color='k', lw=0.5, alpha=0.3)
+    ax.set_ylabel('Q, U')
+    ax.legend(frameon=False, fontsize=8, loc='upper right')
 
-    axes[-1].set_xlabel('Time (ms)')
+    # --- V in blue ---
+    ax = axes[3]
+    ax.plot(t_ms, V_ts, lw=0.9, c=colors['V'], label='V')
+    ax.axhline(0, color='k', lw=0.5, alpha=0.3)
+    ax.set_ylabel('V')
+    ax.set_xlabel('Time (ms)')
+    ax.legend(frameon=False, fontsize=8, loc='upper right')
+
     fig.tight_layout()
     fig.savefig(outpath, dpi=130)
     plt.close(fig)
@@ -348,6 +443,15 @@ def get_tx_resolution(cand_file):
     e.g. 4us/foo.cands -> 4us
     """
     return Path(cand_file).parent.name
+
+
+def tx_res_us(cand_file):
+    """Numeric resolution (us) of a .cands file's parent folder, for ordering."""
+    name = get_tx_resolution(cand_file)
+    try:
+        return float(name.replace('us', ''))
+    except ValueError:
+        return float('inf')
 # --------------------------------------------------------------------------
 # Main
 # --------------------------------------------------------------------------
@@ -368,13 +472,32 @@ def main():
                           'a floor, so wider-boxcar candidates can still produce a large '
                           'window via width_factor scaling; set this to cap it')
     ap.add_argument('--min-snr', type=float, default=0.0)
+    ap.add_argument('--dedup-tol-s', type=float, default=0.001,
+                     help='skip candidates whose MJD falls within this many seconds of an '
+                          'already-extracted candidate from the SAME search resolution '
+                          '(the same burst detected at neighbouring trial DMs). Dedup is '
+                          'per-resolution only: every resolution gets its own cutout. '
+                          'default 0.001 s (1 ms)')
     ap.add_argument('--digifil-bin', default='digifil')
-    ap.add_argument('--digifil-min-block', type=float, default=6.0,
-                     help='minimum duration (s) to request from digifil per call. Short '
-                          'requests fail (zero output) due to FFT edge-loss when forming a '
-                          'filterbank on-the-fly from voltages — confirmed 6s works, '
-                          '<=20ms does not, across every -B/-overlap/-I combination tried. '
-                          'The desired small window is trimmed out client-side afterward.')
+    ap.add_argument('--digifil-fft', '--df-fft', type=int, default=32,
+                     help='digifil FFT factor (-F), i.e. number of channels. Sets the '
+                          'time resolution of the extracted cutouts: for a 32 MHz band, '
+                          '-F 32 gives 32 x 1 MHz channels at 1 us raw dt; increase it '
+                          '(64, 128, ...) for finer time resolution. Independent of the '
+                          'transientX search resolution used in tx.sh.')
+    ap.add_argument('--plot-ts-us', type=float, default=None,
+                     help='override the diagnostic-png time scrunch (us). Default: use '
+                          'the transientX search resolution from the .cands folder name.')
+    ap.add_argument('--plot-no-ts', action='store_true',
+                     help='plot the diagnostic png at the native extracted time '
+                          'resolution instead of scrunching to the search resolution '
+                          '(useful with a finer --digifil-fft)')
+    ap.add_argument('--digifil-min-block', '--df-min-block', type=float, default=6.0,
+                     help='minimum duration (s) to request from digifil per call. The '
+                          'desired small window is trimmed out client-side afterward. '
+                          'Values below 2.0s are clamped up: digifil HANGS on -T shorter '
+                          'than ~1.5s when forming a filterbank from voltages (verified '
+                          '-F 16..128).')
     ap.add_argument('--keep-fil', action='store_true',
                      help='keep the intermediate .fil cutout (deleted by default once .npz is saved)')
     ap.add_argument('--plot', action='store_true',
@@ -383,16 +506,16 @@ def main():
     args = ap.parse_args()
 
     print(f"Indexing fragments in {args.workdir} ...")
-    frags = build_fragment_index(args.workdir)
+    frags, stream_root = build_fragment_index(args.workdir)
     print(f"  found {len(frags)} fragments, "
-          f"MJD {frags[0]['tstart_mjd']:.9f} -> {frags[-1]['t_end_mjd']:.9f}")
+          f"MJD {frags[0]['tstart_mjd']:.9f} -> {frags[-1]['t_end_mjd']:.9f} "
+          f"(continuous-search root MJD {stream_root:.9f})")
 
     base_outdir = Path(args.outdir)
     base_outdir.mkdir(parents=True, exist_ok=True)
-    seen = set()
 
     if args.cand_dir:
-        cand_files = sorted(Path(args.cand_dir).rglob('*.cands'))
+        cand_files = sorted(Path(args.cand_dir).rglob('*.cands'), key=tx_res_us)
     else:
         cand_files = [Path(x) for x in args.cand_files]
 
@@ -405,8 +528,16 @@ def main():
         
         print(f"TX resolution: {tx_res}")
 
+        # Dedup state is per-resolution: the same physical burst appears once
+        # per search resolution, and every resolution should be extracted.
+        # Within one .cands file, transientX lists the same burst at several
+        # neighbouring trial DMs (~0.2 ms MJD spread), so skip only those.
+        seen = set()
+        seen_bursts = []
+
         cand_file = Path(cand_file)
         print(f'\n=== {cand_file} ===')
+        cands = []
         for line in open(cand_file):
             line = line.strip()
             if not line or line.startswith('#'):
@@ -414,14 +545,19 @@ def main():
             c = parse_cand_line(line)
             if c['snr'] is not None and c['snr'] < args.min_snr:
                 continue
+            cands.append(c)
+        # Process in MJD order: candidates in the same fragment are then read
+        # from page cache (digifil re-reads each fragment from the start on
+        # every call, so one cold read per fragment is all we want).
+        cands.sort(key=lambda c: c['mjd'])
+        for c in cands:
 
-            frag = find_fragment(frags, c['mjd'])
+            frag, offset_s = find_fragment(frags, stream_root, c['mjd'])
 
             if frag is None:
                 print(f"  cand {c['cand_id']} mjd={c['mjd']:.9f}: NO fragment contains this MJD")
                 continue
 
-            offset_s = (c['mjd'] - frag['tstart_mjd']) * 86400.0
             window_s = window_for_cand(c, frag, args.min_window, args.width_factor,
                                         max_window_s=args.max_window)
             digifil_seek_s, digifil_dur_s = digifil_extraction_span(
@@ -441,7 +577,7 @@ def main():
             print(f"  duration (s)      : {frag['obslen_s']:.6f}")
             
             print(f"\nComputed")
-            print(f"  offset_s          : {offset_s:.6f}")
+            print(f"  offset_s (local)  : {offset_s:.6f}")
             print(f"  window_s          : {window_s:.6f}")
             print(f"  digifil_seek_s    : {digifil_seek_s:.6f}")
             print(f"  digifil_dur_s     : {digifil_dur_s:.6f}")
@@ -452,6 +588,12 @@ def main():
                 continue
             seen.add(key)
 
+            if is_burst_duplicate(c['mjd'], seen_bursts, args.dedup_tol_s):
+                print(f"  cand {c['cand_id']} mjd={c['mjd']:.9f}: skipping, same burst "
+                      f"(MJD within {args.dedup_tol_s*1e3:.0f} ms of one already extracted)")
+                continue
+            seen_bursts.append(c['mjd'])
+
             outname = f"cand{c['cand_id']}_{c['mjd']:.9f}_dm{c['dm']:.2f}"
             print(f"  cand {c['cand_id']}: mjd={c['mjd']:.9f} width={c['width_ms']}ms "
                   f"dm={c['dm']:.2f} -> {frag['dada_path'].name} "
@@ -459,7 +601,9 @@ def main():
                   f"digifil_seek={digifil_seek_s:.4f}s digifil_dur={digifil_dur_s:.4f}s snr={c['snr']}")
 
             fil_cutout = extract_cutout(frag['dada_path'], digifil_seek_s, digifil_dur_s,
-                                         c['dm'], outname, outdir, digifil_bin=args.digifil_bin)
+                                         c['dm'], outname, outdir,
+                                         digifil_bin=args.digifil_bin,
+                                         fft=args.digifil_fft)
             if fil_cutout is None:
                 continue
 
@@ -574,12 +718,24 @@ def main():
             print(f"    saved -> {npz_path}  shape={stokes.shape} (pol,chan,samp)")
 
             if args.plot:
-                png_path = outdir / f"{outname}_diag.png"
+                if args.plot_no_ts:
+                    tscrunch_us = None
+                else:
+                    tscrunch_us = (args.plot_ts_us
+                                   if args.plot_ts_us is not None
+                                   else float(tx_res.replace("us", "")))
+                plot_dt_us = (cutout_hdr['tsamp_s'] * 1e6
+                              if tscrunch_us is None else tscrunch_us)
+                plot_dt_label = f"{plot_dt_us:g}us"
+                plot_outdir = base_outdir / plot_dt_label
+                plot_outdir.mkdir(parents=True, exist_ok=True)
+                png_path = plot_outdir / f"{outname}_diag.png"
                 try:
                     plot_diagnostic(stokes, cutout_hdr['tsamp_s'], cutout_hdr['f1_mhz'],
                                      cutout_hdr['bw_mhz'], cutout_hdr['nchan'], png_path,
-                                     title=f"dt={tx_res}  cand {c['cand_id']}  mjd={c['mjd']:.6f}  "
-                                           f"dm={c['dm']:.2f}  snr={c['snr']}", tscrunch_us=float(tx_res.replace("us","")))
+                                     title=f"dt={plot_dt_label}  cand {c['cand_id']}  mjd={c['mjd']:.6f}  "
+                                           f"dm={c['dm']:.2f}  snr={c['snr']}",
+                                     tscrunch_us=tscrunch_us)
                 except Exception as e:
                     print(f"    plot FAILED: {e}")
 
