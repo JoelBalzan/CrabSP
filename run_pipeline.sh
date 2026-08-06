@@ -14,6 +14,8 @@
 #                  DO_SEARCH=1   run transientX
 #                  DO_EXTRACT=1  run extract_cands.py
 # Parallelism:     FIL_JOBS=N    concurrent digifil jobs while forming filterbanks
+#                               (default 1 — the fragments are on a single
+#                               external HDD; parallel reads thrash the disk)
 #
 # Usage:  ./run_pipeline.sh > pipeline.log 2>&1
 set -euo pipefail
@@ -28,7 +30,10 @@ export DIGIFIL
 DO_FIL=${DO_FIL:-1}
 DO_SEARCH=${DO_SEARCH:-1}
 DO_EXTRACT=${DO_EXTRACT:-1}
-FIL_JOBS=${FIL_JOBS:-4}
+# The raw fragments live on a single external HDD (~0.3x real-time sequential
+# read). Running multiple digifil in parallel makes each job ~3x slower than
+# sequential (head thrashing), so this defaults to 1 — do not raise it.
+FIL_JOBS=${FIL_JOBS:-1}
 
 # The three Crab observations (directories holding the raw *.dada fragments)
 OBS=(
