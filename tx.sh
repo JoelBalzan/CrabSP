@@ -11,7 +11,7 @@ set -euo pipefail
 MODE="${1:-}"
 
 if [[ "$MODE" == "all" ]]; then
-  MODES=(1us 5us 10us)
+  MODES=(1us 5us 10us 20us 40us)
 elif [[ -n "$MODE" ]]; then
   MODES=("$MODE")
 else
