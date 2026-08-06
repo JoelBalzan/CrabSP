@@ -1,0 +1,28 @@
+# Python virtual environments
+venv/
+.venv/
+env/
+
+# Packaging/build artifacts
+build/
+dist/
+*.egg
+*.whl
+*.egg-info/
+*.eggs/
+
+# Python bytecode/cache
+__pycache__/
+*.py[cod]
+
+# Project data/output folders
+simfrbs/
+plots/
+output/
+shrine_logs/
+# Local/editor/tooling files
+.vscode/
+.aider*
+*.lprof
+*.mprof
+bash/
