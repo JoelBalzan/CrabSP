@@ -8,6 +8,8 @@
 
 set -euo pipefail
 
+VENV_PYTHON="${VENV_PYTHON:-/home/joel/Documents/GitHub/CrabSP/.venv/bin/python}"
+
 MODE="${1:-}"
 
 if [[ "$MODE" == "all" ]]; then
@@ -85,20 +87,34 @@ for MODE in "${MODES[@]}"; do
     ;;
   esac
 
-  OUTDIR="cands/${MODE}"
-
+  OUTDIR="cands/$MODE"
   echo
   echo "==========================================="
   echo "Running TransientX search"
   echo "  Mode        : $MODE"
   echo "  output dir  : ${OUTDIR}/"
+  echo "  files       : ${#FILES[@]}"
   echo "==========================================="
-
-  OUTDIR="cands/$MODE"
 
   mkdir -p "$OUTDIR"
   pushd "$OUTDIR" >/dev/null
 
+  root_mjd="$("$VENV_PYTHON" -c "import sys; from sigpyproc.readers import FilReader; print('%.10f' % FilReader(sys.argv[1]).header.tstart)" "${FILES[0]}")"
+  cands_file="${ROOT}_${root_mjd}_cfbf00000.cands"
+  if [[ -s "$cands_file" ]]; then
+    # transientX writes candidates incrementally, so an OOM-killed run can
+    # leave a partial .cands. Only trust it if its LAST candidate's fragment
+    # is this run's final file.
+    last_fil=$(tail -1 "$cands_file" | awk -F'\t' '{gsub(/\r/, "", $NF); print $NF}')
+    if [[ "$last_fil" == "${FILES[-1]}" ]]; then
+      echo "  $cands_file covers ${FILES[-1]##*/}, skipping"
+      popd >/dev/null
+      continue
+    fi
+    echo "  $cands_file incomplete (last cand in ${last_fil##*/}, want ${FILES[-1]##*/}), re-searching"
+    rm -f "$cands_file"
+  fi
+  echo "  searching ${FILES[0]##*/} .. ${FILES[-1]##*/} (${#FILES[@]} filterbanks, root MJD $root_mjd)"
   transientx_fil -v \
     --rootname "${ROOT}" \
     --td "${TD}" \

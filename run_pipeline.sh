@@ -21,11 +21,14 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-VENV_PYTHON="${VENV_PYTHON:-$SCRIPT_DIR/.venv/bin/python}"
+VENV_PYTHON="${VENV_PYTHON:-/home/joel/Documents/GitHub/CrabSP/.venv/bin/python}"
 DIGIFIL="${DIGIFIL:-/home/joel/Pulsar/bin/digifil}"
 
 export PATH="/home/joel/Pulsar/bin:/opt/TransientX/bin:$PATH"
 export DIGIFIL
+# The venv lives with the scripts in this repo (NOT in the data directories),
+# so export it explicitly for tx.sh / extract_cands.py.
+export VENV_PYTHON
 
 DO_FIL=${DO_FIL:-1}
 DO_SEARCH=${DO_SEARCH:-1}
@@ -47,6 +50,24 @@ make_search_fil() {
 }
 export -f make_search_fil
 
+# A .dada fragment is 4096-byte header + N * float32 samples. digifil emits a
+# 351-byte .fil header + N * 32 * 1-byte (8-bit) samples. So the .fil must be
+#   expected = (dada_size - 4096) / 4 + 351
+# bytes. digifil intermittently stops early on USB I/O contention, producing a
+# shorter .fil; deleting it here makes the loop below regenerate it.
+verify_fil_size() {
+  local dada=$1 fil="$1.fil"
+  [[ -f "$fil" ]] || return 0
+  local dsz fsz exp
+  dsz=$(stat -c%s "$dada")
+  fsz=$(stat -c%s "$fil")
+  exp=$(( (dsz - 4096) / 4 + 351 ))
+  if (( fsz < exp - 1024 )); then
+    echo "  TRUNCATED: ${fil##*/} ($fsz B < expected $exp B) — removing to regenerate"
+    rm -f "$fil"
+  fi
+}
+
 for dir in "${OBS[@]}"; do
   echo
   echo "############################################################"
@@ -56,9 +77,14 @@ for dir in "${OBS[@]}"; do
 
   if (( DO_FIL )); then
     mapfile -t DADA < <(find . -maxdepth 1 -name '*.dada' ! -name '*.dada.fil' | sort)
+
+    echo "== [1/3] forming search filterbanks (${#DADA[@]} fragments) =="
+    for f in "${DADA[@]}"; do
+      verify_fil_size "$f"
+    done
     mapfile -t NEED < <(for f in "${DADA[@]}"; do [[ -f "$f.fil" ]] || printf '%s\n' "$f"; done)
 
-    echo "== [1/3] forming search filterbanks (${#NEED[@]} missing / ${#DADA[@]} fragments) =="
+    echo "  ${#NEED[@]} to form / ${#DADA[@]} fragments"
     if (( ${#NEED[@]} )); then
       set +e
       printf '%s\n' "${NEED[@]}" | xargs -P "$FIL_JOBS" -I{} bash -c 'make_search_fil "$@"' _ {}
@@ -66,6 +92,19 @@ for dir in "${OBS[@]}"; do
       set -e
       if (( rc )); then
         echo "  WARNING: digifil failed for at least one fragment (rc=$rc) — check for zero-byte .fil"
+      fi
+      mapfile -t STILL_BAD < <(for f in "${DADA[@]}"; do
+        if [[ ! -f "$f.fil" ]]; then
+          printf '%s\n' "${f##*/} (missing)"
+        else
+          dsz=$(stat -c%s "$f"); fsz=$(stat -c%s "$f.fil")
+          exp=$(( (dsz - 4096) / 4 + 351 ))
+          (( fsz < exp - 1024 )) && printf '%s\n' "${f##*/} (still truncated)"
+        fi
+      done)
+      if (( ${#STILL_BAD[@]} )); then
+        echo "  WARNING: still bad after regeneration — rerun the pipeline to retry:"
+        printf '    %s\n' "${STILL_BAD[@]}"
       fi
       n_fil=$(find . -maxdepth 1 -name '*.dada.fil' | wc -l)
       echo "  done: $n_fil / ${#DADA[@]} search filterbanks present"
