@@ -62,9 +62,10 @@ python3 extract_cands.py \
    span is computed and the fragments are sorted chronologically.
 2. **MJD matching** — each candidate's MJD is matched to the fragment that
    contains it (with a 10 ms tolerance).
-3. **Window sizing** — the cutout window is scaled from the candidate width
-   (`--width-factor 10`, floored at `--min-window` 5 ms) plus the dispersive
-   smear across the band at the candidate DM.
+3. **Event clustering** — candidates are grouped into events on the MJD axis
+   (gap `--cluster-gap-ms`, default 3 ms ≈ the Crab main-pulse window; rotations
+   are 33.4 ms apart). Each event yields one cutout, centred on the highest-SNR
+   detection, with a fixed `--window-s` (default 6 ms).
 4. **digifil extraction** — forming a filterbank on the fly from voltages
    (with `-F`, see [time resolution](#time-resolution-digifil-fft)) discards
    FFT settle/edge regions, so very short requests return
@@ -110,9 +111,8 @@ native extracted resolution instead.
 | `--workdir DIR` | `.` | directory containing `*.dada` + matching `*.dada.fil` |
 | `--outdir DIR` | `cutouts` | output directory (per-resolution subdirs created) |
 | `--min-snr S` | `0.0` | drop candidates below this S/N |
-| `--min-window S` | `0.005` | floor on the cutout window (s) |
-| `--width-factor N` | `10` | window = N × candidate width (+ smear) |
-| `--max-window S` | `None` | cap on the cutout window (s) |
+| `--cluster-gap-ms M` | `3.0` | MJD gap that separates one pulse event from the next (ms) |
+| `--window-s S` | `0.006` | fixed cutout window (s), centred on the burst |
 | `--digifil-min-block S` | `6.0` | min duration to request from digifil (see note above) |
 | `--digifil-bin` | `digifil` | path to the digifil binary |
 | `--digifil-fft` | `32` | digifil `-F`, number of channels; sets cutout time resolution (see below) |

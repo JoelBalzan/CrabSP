@@ -90,18 +90,30 @@ def find_fragment(frags, stream_root, mjd, tol_s=0.01):
     return None, None
 
 
-def is_burst_duplicate(mjd, seen_mjds, tol_s=0.001):
-    """True if a candidate with an MJD within tol_s has already been extracted.
+def cluster_candidates(cands, gap_s):
+    """Group candidates into events by MJD.
 
-    transientX reports the same burst at several neighbouring trial DMs, each
-    with a slightly different peak MJD (the dispersive delay moves the peak by
-    ~0.2 ms per 0.05 DM here). Those are one physical event, so dedup on the
-    burst time rather than the exact MJD / offset.
+    Equivalent to DBSCAN(radius=gap_s, minPts=1) on the time axis: a new event
+    starts when consecutive (MJD-sorted) candidates are more than gap_s apart.
+    One physical Crab pulse produces one .cands row per trial DM within a few
+    tenths of a ms (the dispersive delay shifts the peak by ~0.2 ms per 0.05 DM),
+    while different rotations sit a 33 ms period apart — so a gap of ~3 ms (the
+    main-pulse window) merges same-pulse detections without merging rotations
+    or an MP+IP pair (~half a period apart).
     """
-    for prev in seen_mjds:
-        if abs(mjd - prev) * 86400.0 <= tol_s:
-            return True
-    return False
+    cands = sorted(cands, key=lambda c: c['mjd'])
+    events = []
+    for c in cands:
+        if events and (c['mjd'] - events[-1][-1]['mjd']) * 86400.0 <= gap_s:
+            events[-1].append(c)
+        else:
+            events.append([c])
+    return events
+
+
+def pick_representative(event):
+    """The highest-SNR candidate of an event (best DM estimate + peak time)."""
+    return max(event, key=lambda c: c['snr'] or 0.0)
 
 
 # --------------------------------------------------------------------------
@@ -119,26 +131,6 @@ def parse_cand_line(line):
         'snr': float(p[5]) if len(p) > 5 else None,
         'fil_path_in_cand': p[-1],
     }
-
-
-def dm_smear_s(dm, f1_mhz, bw_mhz, nchan):
-    """Dispersive smear across the observing band at this DM (s)."""
-    f_hi = f1_mhz
-    f_lo = f1_mhz + bw_mhz * nchan
-    f_lo, f_hi = sorted([f_lo, f_hi])
-    return 4.1488e3 * dm * (f_lo**-2 - f_hi**-2)
-
-
-def window_for_cand(c, frag, min_window_s=0.02, width_factor=10, snr_factor_floor=0.005,
-                     max_window_s=None):
-    """Window to request from digifil, in seconds."""
-    width_s = (c['width_ms'] or 0) / 1000.0
-    smear_s = dm_smear_s(c['dm'], frag['f1_mhz'], frag['bw_mhz'], frag['nchan'])
-    half_span = max(width_factor * width_s, snr_factor_floor) + smear_s
-    window_s = max(2 * half_span, min_window_s)
-    if max_window_s is not None:
-        window_s = min(window_s, max_window_s)
-    return window_s
 
 
 # --------------------------------------------------------------------------
@@ -463,23 +455,19 @@ def main():
     ap.add_argument('--cand_files', nargs='+')
     ap.add_argument('--workdir', default='.')
     ap.add_argument('--outdir', default='cutouts')
-    ap.add_argument('--min-window', type=float, default=0.005,
-                     help='floor on cutout window length, seconds (default 5ms — '
-                          'previous 20ms default swamped sub-ms Crab GPs in the plots)')
-    ap.add_argument('--width-factor', type=float, default=10)
-    ap.add_argument('--max-window', type=float, default=None,
-                     help='cap on cutout window length, seconds — --min-window only sets '
-                          'a floor, so wider-boxcar candidates can still produce a large '
-                          'window via width_factor scaling; set this to cap it')
+    ap.add_argument('--window-s', type=float, default=0.006,
+                     help='fixed cutout window length, seconds (default 6 ms), '
+                          'centred on the burst. Crab GPs are sub-ms, so 6 ms is '
+                          'ample and keeps the cutout focused on the pulse.')
     ap.add_argument('--min-snr', type=float, default=0.0)
-    ap.add_argument('--dedup-tol-s', type=float, default=0.001,
-                     help='skip candidates whose MJD falls within this many seconds of an '
-                          'already-extracted candidate from the SAME search resolution '
-                          '(the same burst detected at neighbouring trial DMs). Dedup is '
-                          'per-resolution only: every resolution gets its own cutout. '
-                          'default 0.001 s (1 ms)')
+    ap.add_argument('--cluster-gap-ms', type=float, default=3.0,
+                     help='merge candidates into one event when consecutive MJDs are '
+                          'less than this far apart (ms). The Crab main-pulse window is '
+                          '~3 ms and rotations are 33.4 ms apart, so 3 ms groups the '
+                          'same pulse (many trial-DM detections) without merging '
+                          'different rotations or an MP+IP pair. default 3 ms')
     ap.add_argument('--digifil-bin', default='digifil')
-    ap.add_argument('--digifil-fft', '--df-fft', type=int, default=32,
+    ap.add_argument('--digifil-fft', '--df-fft', '-F', type=int, default=32,
                      help='digifil FFT factor (-F), i.e. number of channels. Sets the '
                           'time resolution of the extracted cutouts: for a 32 MHz band, '
                           '-F 32 gives 32 x 1 MHz channels at 1 us raw dt; increase it '
@@ -526,13 +514,6 @@ def main():
         
         print(f"TX resolution: {tx_res}")
 
-        # Dedup state is per-resolution: the same physical burst appears once
-        # per search resolution, and every resolution should be extracted.
-        # Within one .cands file, transientX lists the same burst at several
-        # neighbouring trial DMs (~0.2 ms MJD spread), so skip only those.
-        seen = set()
-        seen_bursts = []
-
         cand_file = Path(cand_file)
         print(f'\n=== {cand_file} ===')
         cands = []
@@ -544,11 +525,18 @@ def main():
             if c['snr'] is not None and c['snr'] < args.min_snr:
                 continue
             cands.append(c)
-        # Process in MJD order: candidates in the same fragment are then read
-        # from page cache (digifil re-reads each fragment from the start on
-        # every call, so one cold read per fragment is all we want).
-        cands.sort(key=lambda c: c['mjd'])
-        for c in cands:
+
+        # Cluster into events, per resolution: one physical pulse appears once
+        # per trial DM in the .cands file, so collapse them and extract a single
+        # cutout per event, centred on the highest-SNR detection.
+        events = cluster_candidates(cands, args.cluster_gap_ms / 1000.0)
+        n_events = len(events)
+        n_cands = len(cands)
+        print(f"  {n_cands} candidates -> {n_events} events "
+              f"(cluster gap {args.cluster_gap_ms:g} ms; "
+              f"{n_cands / max(n_events, 1):.1f} detections/event)")
+        for i_event, event in enumerate(events):
+            c = pick_representative(event)
 
             frag, offset_s = find_fragment(frags, stream_root, c['mjd'])
 
@@ -556,13 +544,13 @@ def main():
                 print(f"  cand {c['cand_id']} mjd={c['mjd']:.9f}: NO fragment contains this MJD")
                 continue
 
-            window_s = window_for_cand(c, frag, args.min_window, args.width_factor,
-                                        max_window_s=args.max_window)
+            window_s = args.window_s
             digifil_seek_s, digifil_dur_s = digifil_extraction_span(
                 offset_s, frag, min_block_s=args.digifil_min_block)
 
             print("\n==========================")
-            print(f"Candidate {c['cand_id']}")
+            print(f"Event {i_event+1}/{n_events} "
+                  f"({len(event)} detections, cand {c['cand_id']})")
             print(f"Candidate MJD        : {c['mjd']:.12f}")
             print(f"Candidate DM         : {c['dm']}")
             print(f"Candidate Width (ms) : {c['width_ms']}")
@@ -579,18 +567,6 @@ def main():
             print(f"  window_s          : {window_s:.6f}")
             print(f"  digifil_seek_s    : {digifil_seek_s:.6f}")
             print(f"  digifil_dur_s     : {digifil_dur_s:.6f}")
-
-            key = (cand_file.name, frag['dada_path'], round(offset_s, 6))
-            if key in seen:
-                print(f"  cand {c['cand_id']}: skipping, duplicate of already-extracted cand")
-                continue
-            seen.add(key)
-
-            if is_burst_duplicate(c['mjd'], seen_bursts, args.dedup_tol_s):
-                print(f"  cand {c['cand_id']} mjd={c['mjd']:.9f}: skipping, same burst "
-                      f"(MJD within {args.dedup_tol_s*1e3:.0f} ms of one already extracted)")
-                continue
-            seen_bursts.append(c['mjd'])
 
             outname = f"cand{c['cand_id']}_{c['mjd']:.9f}_dm{c['dm']:.2f}"
             print(f"  cand {c['cand_id']}: mjd={c['mjd']:.9f} width={c['width_ms']}ms "
