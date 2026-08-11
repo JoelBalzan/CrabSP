@@ -137,36 +137,52 @@ def parse_cand_line(line):
 # digifil extraction
 # --------------------------------------------------------------------------
 
-def digifil_extraction_span(offset_s, frag, min_block_s=6.0):
+def plan_extraction(frags, frag, offset_s, min_block_s=0.5, margin_s=0.05):
     """
-    Forming a filterbank on-the-fly from voltages (-F) requires an FFT with a
-    settle/edge region discarded on each side to avoid convolution artifacts.
-    For short -T requests the whole window can fall inside that discarded edge,
-    producing zero valid output samples — and, worse, requests below ~1.5 s
-    HANG digifil entirely (confirmed: -T 2.0 works for every -F from 16 to 128,
-    -T <= 1.2 never finishes). Work around this by always requesting a block
-    >= SAFE_MIN_BLOCK_S (clipped to the fragment's duration), centred on the
-    candidate, and trimming to the desired small window client-side after
-    reading the data back.
+    digifil returns LESS than the requested -T seconds (with this DADA header
+    dspsr drops a fixed ~0.24 s settle) and it REFUSES any block whose end
+    exceeds the last .dada file passed. The old code clamped the block to end
+    at the candidate's fragment boundary, so pulses in the last ~0.25 s of a
+    fragment fell past the data digifil actually wrote and the trim failed.
 
-    Returns (seek_s, duration_s) to pass to digifil.
+    Instead: start the block a small margin BEFORE the candidate (never clamped
+    to the fragment end) and let it run min_block seconds. If that crosses a
+    fragment boundary, pass the neighbouring .dada files too with -cont (the
+    fragments are contiguous, so digifil reads straight across). The cutout
+    header tstart then still lands on the candidate's true MJD, so the client-
+    side trim is unchanged.
+
+    Returns (dada_paths, seek_s, dur_s, first_frag, note); (None, ...) if the
+    candidate cannot be covered.
     """
     SAFE_MIN_BLOCK_S = 0.5
-    frag_dur_s = frag['nsamp'] * frag['tsamp_s']
-
     block_s = max(min_block_s, SAFE_MIN_BLOCK_S)
-    if block_s > frag_dur_s:
-        if min_block_s < SAFE_MIN_BLOCK_S:
-            print(f"    [warning] fragment is only {frag_dur_s:.2f}s long — shorter than the "
-                  f"safe digifil block {SAFE_MIN_BLOCK_S}s; this run may hang")
-        block_s = frag_dur_s
-    elif min_block_s < SAFE_MIN_BLOCK_S:
-        print(f"    [warning] requested digifil block {min_block_s}s is below the safe "
-              f"minimum {SAFE_MIN_BLOCK_S}s (shorter -T hangs digifil); using {block_s:.2f}s")
 
-    seek_s = offset_s - block_s / 2.0
-    seek_s = max(0.0, min(seek_s, frag_dur_s - block_s))
-    return seek_s, block_s
+    seek_s = max(0.0, offset_s - margin_s)
+    block_start_abs = frag['tstart_mjd'] + seek_s / 86400.0
+    block_end_abs = block_start_abs + block_s / 86400.0
+
+    cover = [
+        f for f in frags
+        if f['tstart_mjd'] < block_end_abs and f['t_end_mjd'] > block_start_abs
+    ]
+    if not cover:
+        return None, None, None, None, "candidate falls outside all fragments"
+
+    first = cover[0]
+    last = cover[-1]
+    if block_end_abs > last['t_end_mjd']:
+        # Candidate so close to the end of the observation that even the final
+        # fragment can't contain the block: clamp and let the trim report it.
+        block_s = (last['t_end_mjd'] - block_start_abs) * 86400.0
+        if block_s < SAFE_MIN_BLOCK_S:
+            return (None, None, None, None,
+                    f"candidate is only {block_s:.2f}s before the end of the "
+                    f"observation — digifil cannot read past it; skipping")
+
+    digifil_seek_s = (block_start_abs - first['tstart_mjd']) * 86400.0
+    dada_paths = [f['dada_path'] for f in cover]
+    return dada_paths, digifil_seek_s, block_s, first, None
 
 
 def trim_to_window(stokes, block_tstart_mjd, tsamp_s, cand_mjd, window_s):
@@ -184,13 +200,14 @@ def trim_to_window(stokes, block_tstart_mjd, tsamp_s, cand_mjd, window_s):
     if i1 <= i0:
         raise RuntimeError(
             f"candidate falls outside extracted block (i0={i0}, i1={i1}, nsamp={nsamp}) "
-            f"— increase --digifil-min-block"
+            f"— increase --digifil-min-block (or the candidate is within ~0.3 s "
+            f"of the end of the observation and cannot be covered)"
         )
     trimmed_tstart_mjd = block_tstart_mjd + (i0 * tsamp_s) / 86400.0
     return stokes[..., i0:i1], trimmed_tstart_mjd
 
 
-def extract_cutout(dada_path, offset_s, window_s, dm, outname, outdir,
+def extract_cutout(dada_paths, seek_s, dur_s, dm, outname, outdir,
                     digifil_bin='digifil', nbits=-32, fft=32):
     outdir.mkdir(parents=True, exist_ok=True)
     out_fil = outdir / f"{outname}.fil"
@@ -198,8 +215,8 @@ def extract_cutout(dada_path, offset_s, window_s, dm, outname, outdir,
         out_fil.unlink()  # digifil refuses to overwrite; clear stale/partial files first
     cmd = [
         digifil_bin,
-        '-S', f'{max(offset_s, 0):.6f}',
-        '-T', f'{window_s:.6f}',
+        '-S', f'{max(seek_s, 0):.6f}',
+        '-T', f'{dur_s:.6f}',
         '-F', str(fft),  # FFT factor -> number of channels, sets the time
                           # resolution: with a 32 MHz band, -F 32 gives 32 x 1 MHz
                           # channels and 1 us raw dt; larger -F -> finer dt
@@ -214,19 +231,22 @@ def extract_cutout(dada_path, offset_s, window_s, dm, outname, outdir,
                              # without this, AA/BB (physically non-negative
                              # powers) come back ~50% negative
         '-o', str(out_fil),
-        str(dada_path),
     ]
+    if len(dada_paths) > 1:
+        cmd.append('-cont')  # treat the fragments as one continuous stream so the
+                             # block can span a fragment boundary (see plan_extraction)
+    cmd.extend(str(p) for p in dada_paths)
     print("\nRunning digifil")
     print(" ".join(cmd))
     # Don't capture output: digifil writes a \r progress bar to stderr and
     # capturing it hides all progress (looks like a 10-minute freeze). The
     # timeout is a safety net for the known short--T hang.
-    timeout_s = max(120.0, 15.0 * (offset_s + window_s))
+    timeout_s = max(120.0, 15.0 * (seek_s + dur_s))
     try:
         r = subprocess.run(cmd, timeout=timeout_s)
     except subprocess.TimeoutExpired:
         print(f"    digifil TIMED OUT after {timeout_s:.0f}s "
-              f"(seek={offset_s:.2f}s + dur={window_s:.2f}s) — this is the known "
+              f"(seek={seek_s:.2f}s + dur={dur_s:.2f}s) — this is the known "
               f"short--T hang; keep --digifil-min-block >= 2.0s")
         return None
     if r.returncode != 0:
@@ -545,8 +565,11 @@ def main():
                 continue
 
             window_s = args.window_s
-            digifil_seek_s, digifil_dur_s = digifil_extraction_span(
-                offset_s, frag, min_block_s=args.digifil_min_block)
+            dada_paths, digifil_seek_s, digifil_dur_s, first_frag, plan_note = plan_extraction(
+                frags, frag, offset_s, min_block_s=args.digifil_min_block)
+            if dada_paths is None:
+                print(f"    SKIP cand {c['cand_id']} mjd={c['mjd']:.9f}: {plan_note}")
+                continue
 
             print("\n==========================")
             print(f"Event {i_event+1}/{n_events} "
@@ -567,6 +590,7 @@ def main():
             print(f"  window_s          : {window_s:.6f}")
             print(f"  digifil_seek_s    : {digifil_seek_s:.6f}")
             print(f"  digifil_dur_s     : {digifil_dur_s:.6f}")
+            print(f"  digifil files     : {[p.name for p in dada_paths]}")
 
             outname = f"cand{c['cand_id']}_{c['mjd']:.9f}_dm{c['dm']:.2f}"
             print(f"  cand {c['cand_id']}: mjd={c['mjd']:.9f} width={c['width_ms']}ms "
@@ -574,7 +598,7 @@ def main():
                   f"final_window={window_s*1000:.2f}ms "
                   f"digifil_seek={digifil_seek_s:.4f}s digifil_dur={digifil_dur_s:.4f}s snr={c['snr']}")
 
-            fil_cutout = extract_cutout(frag['dada_path'], digifil_seek_s, digifil_dur_s,
+            fil_cutout = extract_cutout(dada_paths, digifil_seek_s, digifil_dur_s,
                                          c['dm'], outname, outdir,
                                          digifil_bin=args.digifil_bin,
                                          fft=args.digifil_fft)
@@ -583,7 +607,7 @@ def main():
 
             try:
                 cutout_hdr = parse_fil_header(fil_cutout)
-                expected_start = frag['tstart_mjd'] + digifil_seek_s/86400.0
+                expected_start = first_frag['tstart_mjd'] + digifil_seek_s/86400.0
 
                 print("\nCutout header")
                 print(f"Header start MJD     : {cutout_hdr['tstart_mjd']:.12f}")
@@ -695,9 +719,14 @@ def main():
                 if args.plot_no_ts:
                     tscrunch_us = None
                 else:
-                    tscrunch_us = (args.plot_ts_us
-                                   if args.plot_ts_us is not None
-                                   else float(tx_res.replace("us", "")))
+                    try:
+                        tscrunch_us = (args.plot_ts_us
+                                       if args.plot_ts_us is not None
+                                       else float(tx_res.replace("us", "")))
+                    except ValueError:
+                        # cands file not under a <N>us/ folder (e.g. --cand_files
+                        # from /tmp) — fall back to native extracted resolution.
+                        tscrunch_us = None
                 plot_dt_us = (cutout_hdr['tsamp_s'] * 1e6
                               if tscrunch_us is None else tscrunch_us)
                 plot_dt_label = f"{plot_dt_us:g}us"
