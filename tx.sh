@@ -158,6 +158,7 @@ for MODE in "${MODES[@]}"; do
   fi
   echo "  searching ${FILES[0]##*/} .. ${FILES[-1]##*/} (${#FILES[@]} filterbanks, root MJD $root_mjd)"
   transientx_fil -v \
+    -t "$(nproc)" \
     --rootname "${ROOT}" \
     --td "${TD}" \
     --zapthre 3.0 \
@@ -174,13 +175,34 @@ for MODE in "${MODES[@]}"; do
     --drop \
     --baseline 0 5 \
     --iqr \
+    --widthlimit 0.0001 \
     -z kadaneF 8 4 zdot \
-    --widthlimit 2 \
+    --threKadaneF 5 \
     -r 4 \
     -k 3 \
     --minpts 3 \
     --maxncand 100 \
     -f "${FILES[@]}"
+
+  if [[ -s "$cands_file" ]]; then
+    echo "  cleaning candidates with replot_fil"
+    replot_fil -v \
+      -t "$(nproc)" \
+      --td "${TD}" \
+      --zapthre 3.0 \
+      --zdot \
+      --kadane 8 4 7 \
+      --snrloss 0.1 \
+      --candfile "${cands_file}" \
+      --dmcutoff 20 \
+      --widthcutoff "${MAXW}" \
+      --snrcutoff "${THRE}" \
+      --clean \
+      --cont \
+      -f "${FILES[@]}"
+  else
+    echo "  WARNING: no cands file, skipping replot_fil" >&2
+  fi
 
   popd >/dev/null
 
