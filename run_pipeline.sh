@@ -2,9 +2,9 @@
 # run_pipeline.sh — full CrabSP single-pulse pipeline for all 3 Crab nights.
 #
 # For every observation directory this:
-#   1. forms a search filterbank  (<fragment>.dada.fil — 32x1 MHz, 8-bit, 1 us,
+#   1. forms a search filterbank  (<fragment>.dada.fil — 8x4 MHz, 8-bit, 0.25 us,
 #      total intensity)  for every raw .dada fragment that lacks one
-#      (digifil -F 32 -d 1 -b 8 -I 0)
+#      (digifil -F 8 -d 1 -b 8 -I 0)
 #   2. runs the transientX multi-resolution search over all contiguous search
 #      filterbanks (tx.sh all: 1us 5us 10us 20us 40us)  ->  cands/<res>/
 #   3. extracts full-Stokes cutouts for every candidate (extract_cands.py,
@@ -46,12 +46,14 @@ OBS=(
 )
 
 make_search_fil() {
-  "$DIGIFIL" -F 32 -d 1 -b 8 -I 0 -o "$1.fil" "$1"
+  "$DIGIFIL" -F 8 -d 1 -b 8 -I 0 -o "$1.fil" "$1"
 }
 export -f make_search_fil
 
 # A .dada fragment is 4096-byte header + N * float32 samples. digifil emits a
-# 351-byte .fil header + N * 32 * 1-byte (8-bit) samples. So the .fil must be
+# 351-byte .fil header + one 8-bit output byte per input float32 (the 32 MHz
+# band, split into F channels and decimated Fx in time, is F channels x F time
+# decimation = 1 byte out per input sample). So the .fil must be
 #   expected = (dada_size - 4096) / 4 + 351
 # bytes. digifil intermittently stops early on USB I/O contention, producing a
 # shorter .fil; deleting it here makes the loop below regenerate it.

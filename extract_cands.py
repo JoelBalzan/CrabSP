@@ -228,7 +228,7 @@ def extract_cutout(dada_paths, seek_s, dur_s, dm, outname, outdir,
         '-b', str(nbits),  # negative = float output (SigProcDigitizer only
                             # accepts 1/2/4/8/16 unsigned int, or -32 float)
         '-I', '0',          # disable digifil's default rescale/mean-subtract —
-                             # without this, AA/BB (physically non-negative
+                             # without this, PP/QQ (physically non-negative
                              # powers) come back ~50% negative
         '-o', str(out_fil),
     ]
@@ -264,8 +264,14 @@ def extract_cutout(dada_paths, seek_s, dur_s, dm, outname, outdir,
 
 def read_fil_cube(fil_path):
     """
-    Read a digifil -d4 filterbank cutout into shape (4, nchan, nsamp),
-    pol order AA, BB, CR, CI, using sigpyproc.
+    Read a digifil -d4 cutout filterbank into shape (4, nchan, nsamp), pol
+    order PP, QQ, Re[PQ], Im[PQ], using sigpyproc.
+
+    digifil -d 4 emits the four coherency products PP, QQ, Re[PQ], Im[PQ]
+    (dspsr Signal::Coherence).  sigpyproc's read_block folds the pol/IF axis
+    into the samples axis, IF FASTEST-varying within each time sample: flat
+    per channel = [t0: IF0..IF3, t1: IF0..IF3, ...].  (Verified: this unpack
+    gives clean per-IF means, the transposed one smears them.)
     """
     fil = FilReader(str(fil_path))
     h = fil.header
@@ -287,64 +293,36 @@ def read_fil_cube(fil_path):
             cube = np.transpose(arr, (2, 1, 0))  # (nsamp, nchan, npol) -> (npol, nchan, nsamp)
         else:
             raise RuntimeError(f"{fil_path}: couldn't infer pol axis from shape {arr.shape}, nifs={nifs}")
-
-    #elif arr.ndim == 2:
-    #    # Observed on this sigpyproc/data combo: (nchan, nsamp_time * nifs) — the
-    #    # IF/pol axis isn't split out, it's folded into the "samples" axis.
-    #    # Empirically confirmed via the neg-fraction sanity check below: the
-    #    # flat axis unpacks as (nifs, nsamp_time), i.e. IF varies slower than
-    #    # time for a fixed channel (all of IF0's samples, then all of IF1's, ...).
-    #    nchan, flat = arr.shape
-    #    if flat % nifs != 0:
-    #        raise RuntimeError(
-    #            f"{fil_path}: flat sample axis {flat} not divisible by nifs={nifs} — "
-    #            f"can't safely unpack pol/time, inspect arr.shape by hand."
-    #        )
-    #    nsamp_time = flat // nifs
-    #    cube = arr.reshape(nchan, nifs, nsamp_time)  # confirmed order via neg-fraction check
-    #    cube = np.transpose(cube, (1, 0, 2))  # -> (nifs, nchan, nsamp_time)
-    #else:
-    #    raise RuntimeError(f"{fil_path}: unexpected block ndim {arr.ndim}, shape {arr.shape}")
-
     elif arr.ndim == 2:
-    
-        #print("\n========== RAW ARRAY ==========")
-        #print("arr.shape =", arr.shape)
-        #print("\nFirst channel, first 32 values")
-        #print(arr[0,:32])
-        #print("\nSecond channel, first 32 values")
-        #print(arr[1,:32])
-        #print("\nColumn 0")
-        #print(arr[:,0])
-        #print("\nColumn 1")
-        #print(arr[:,1])
-        #print("\nColumn 2")
-        #print(arr[:,2])
-    
         nchan, flat = arr.shape
+        if flat % nifs:
+            raise RuntimeError(
+                f"{fil_path}: flat sample axis {flat} not divisible by nifs={nifs} — "
+                f"can't safely unpack pol/time, inspect arr.shape by hand."
+            )
         nsamp_time = flat // nifs
-    
-        cube1 = arr.reshape(nchan, nifs, nsamp_time)
-        cube1 = np.transpose(cube1,(1,0,2))
-        
-        cube2 = arr.reshape(nchan, nsamp_time, nifs)
-        cube2 = np.transpose(cube2,(2,0,1))
-        
-        for name,cube in [("cube1",cube1),("cube2",cube2)]:
-            print(name)
-            for i in range(4):
-                print(i,cube[i].mean(),cube[i].std())
+        cube = arr.reshape(nchan, nsamp_time, nifs)  # (chan, time, IF), IF-fast
+        cube = np.transpose(cube, (2, 0, 1))  # -> (nifs, nchan, nsamp_time)
+    else:
+        raise RuntimeError(f"{fil_path}: unexpected block ndim {arr.ndim}, shape {arr.shape}")
 
-    return cube  # (4, nchan, nsamp), order AA, BB, CR, CI
+    return cube  # (4, nchan, nsamp), order PP, QQ, Re[PQ], Im[PQ]
 
 
 def coherency_to_stokes(cube):
-    """cube: (4, nchan, nsamp) in AA, BB, CR, CI -> IQUV."""
-    AA, BB, CR, CI = cube[0], cube[1], cube[2], cube[3]
-    I = AA + BB
-    Q = AA - BB
-    U = 2 * CR
-    V = 2 * CI
+    """cube: (4, nchan, nsamp) in PP, QQ, Re[PQ], Im[PQ] -> IQUV.
+
+    Matches dspsr's own Stokes formation (stokes_detect.ic):
+        S0 = PP + QQ,  S1 = PP - QQ,
+        S2 = 2 Re[PQ], S3 = 2 Im[PQ].
+    (Cutouts are written with -b -32 float, so the cross terms are stored
+    signed directly — no 8-bit +128 offset to remove.)
+    """
+    PP, QQ, RPQ, IPQ = cube[0], cube[1], cube[2], cube[3]
+    I = PP + QQ
+    Q = PP - QQ
+    U = 2 * RPQ
+    V = 2 * IPQ
     return np.stack([I, Q, U, V], axis=0)  # (4, nchan, nsamp), order I,Q,U,V
 
 
@@ -618,7 +596,7 @@ def main():
                 print(f"Header nifs          : {cutout_hdr['nifs']}")
                 print(f"Header nchan         : {cutout_hdr['nchan']}")
 
-                cube = read_fil_cube(fil_cutout)          # (4, nchan, nsamp) AA,BB,CR,CI 
+                cube = read_fil_cube(fil_cutout)          # (4, nchan, nsamp) PP,QQ,Re[PQ],Im[PQ]
                 print("\nCube")
                 print("cube shape:", cube.shape)
                 
@@ -684,7 +662,7 @@ def main():
                 continue
 
             # Sanity check on the TRIMMED window (avoids the untrimmed block's
-            # FFT settle/edge artifacts): I = AA+BB should be ~non-negative.
+            # FFT settle/edge artifacts): I = PP+QQ should be ~non-negative.
             neg_I_frac = float((stokes[0] < 0).mean())
             print(f"    [debug] fraction of trimmed Stokes-I samples < 0: "
                   f"{neg_I_frac:.3f} (expect near 0.0; if not, pol-axis reshape "
