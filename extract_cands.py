@@ -403,7 +403,7 @@ def plot_diagnostic(stokes, tsamp_s, f1_mhz, bw_mhz, nchan, outpath, title='', t
     vmin, vmax = np.percentile(I_bp, [5, 99.5])
     im = ax.imshow(I_bp, aspect='auto', origin='upper',
                    extent=[t_ms[0], t_ms[-1], freqs[-1], freqs[0]],
-                   cmap='viridis', vmin=vmin, vmax=vmax)
+                   cmap='viridis', vmin=vmin, vmax=vmax, interpolation='none')
     ax.set_ylabel('Freq (MHz)')
 
     # --- Q and U in distinct colours ---

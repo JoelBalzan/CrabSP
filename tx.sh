@@ -175,9 +175,9 @@ for MODE in "${MODES[@]}"; do
     --drop \
     --baseline 0 5 \
     --iqr \
-    --widthlimit 0.0001 \
+    --widthlimit 0.001 \
+    --fill rand \
     -z kadaneF 8 4 zdot \
-    --threKadaneF 5 \
     -r 4 \
     -k 3 \
     --minpts 3 \
@@ -185,23 +185,9 @@ for MODE in "${MODES[@]}"; do
     -f "${FILES[@]}"
 
   if [[ -s "$cands_file" ]]; then
-    echo "  cleaning candidates with replot_fil"
-    replot_fil -v \
-      -t "$(nproc)" \
-      --td "${TD}" \
-      --zapthre 3.0 \
-      --zdot \
-      --kadane 8 4 7 \
-      --snrloss 0.1 \
-      --candfile "${cands_file}" \
-      --dmcutoff 20 \
-      --widthcutoff "${MAXW}" \
-      --snrcutoff "${THRE}" \
-      --clean \
-      --cont \
-      -f "${FILES[@]}"
+    echo "  replot_fil disabled (segfaults on width-0 candidates); using search candidates directly"
   else
-    echo "  WARNING: no cands file, skipping replot_fil" >&2
+    echo "  WARNING: no cands file written by search" >&2
   fi
 
   popd >/dev/null
