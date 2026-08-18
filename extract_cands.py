@@ -575,16 +575,6 @@ def fold_cutout(dada_paths, seek_mjd, dm, period, nbin, nchan, turns, outname,
     in this pipeline via resolve_calibration/build_cal_database) -- not a
     single -A calibrator model file.
 
-    CAVEAT: apply_pac()'s receiver-header prep (psredit setting
-    rcvr:hand=-1/rcvr:sa=0.0/rcvr:rph=0.0 and be:name to match the
-    calibrator) normally happens on the folded .ar BEFORE pac is invoked.
-    With inline -pac there is no intermediate .ar to edit first -- dspsr's
-    default fold receiver params (hand=+1/sa=45) apply at calibration time
-    unless dspsr itself was told otherwise, which it currently isn't. This
-    can silently produce a wrong feed-orientation correction. Treat inline
-    -pac output as unverified until cross-checked against the existing
-    fold_cutout + apply_pac two-step path on a known-good candidate.
-
     derotate/rm enable dspsr's own coherent (pre-detection) Faraday rotation
     correction (-derotate -rm <rm>), applied during dedispersion alongside
     -pac if both are given.
@@ -765,67 +755,14 @@ def fold_cutout_fast(dada_paths, seek_mjd, dm, window_s, nbin, nchan, outname,
     return out_ar
 
 
-def cal_beam_name(calib, calib_db, psredit_bin='psredit'):
-    """Beam/instrument name (be:name) of the calibrator pac will match against.
-
-    pac matches the target's `instrument` (be:name) to the calibrator's, so a
-    fold whose be:name differs (dspsr folds default to the first antenna's
-    name) is rejected even when everything else matches.  Read it from the
-    -A calibrator model archive, or from the PolnCal entry of a -w database
-    (database line: name type RA DEC MJD nchan cfreq bw instrument receiver).
-    Returns None if it cannot be determined (caller then leaves be:name alone).
-    """
-    if calib_db and Path(calib_db).exists():
-        for line in open(calib_db):
-            parts = line.split()
-            if len(parts) >= 10 and parts[1] == 'PolnCal':
-                return parts[8]
-    if calib and Path(calib).exists():
-        r = subprocess.run([psredit_bin, '-c', 'be:name', '-q', str(calib)],
-                           capture_output=True, text=True)
-        m = re.search(r'be:name=(\S+)', r.stdout or '')
-        if m:
-            return m.group(1)
-    return None
-
-
 def apply_pac(ar_path, calib=None, calib_db=None, pac_bin='pac',
-              pac_flags='', out_ext='calib',
-              rcvr_params='type=Pulsar,rcvr:basis=lin,rcvr:hand=-1,'
-                          'rcvr:sa=0.0,rcvr:rph=0.0',
-              reverse_freqs=False, psredit_bin='psredit', pam_bin='pam'):
+              pac_flags='', out_ext='calib'):
     """Calibrate a folded .ar with pac, writing `<input>.<ext>` (default .calib).
 
     Either --calib (pac -A <pcm/pacv calibrator model>) or --calib-db
     (pac -d <database from pac -w>) must be set; anything else needed by the
     user's setup (e.g. -x for fluxcal Stokes) goes through pac_flags.
-
-    Header prep before pac (dspsr search-mode folds are missing it; mirrors
-    the manual `psredit -c ... -m *.ar` + `pam --reverse_freqs -m *.ar`
-    workflow):
-      * rcvr_params (a comma-separated psredit attribute string, default the
-        UWL receiver set type=Pulsar, basis=lin, hand=-1, sa=0, rph=0) is
-        written onto the archive: pac rejects a target whose receiver
-        hand/orientation differs from the calibrator's, and dspsr folds default
-        to hand=+1/sa=45 while the UWL cal carries hand=-1/sa=0.
-      * the calibrator's be:name (instrument) is copied onto the target — pac
-        matches on it, so a target/cal beam-name mismatch is rejected.
-      * if reverse_freqs, the fold's channel order is reversed with pam
-        (only needed when the cal archives are recorded descending).
     """
-    beam = cal_beam_name(calib, calib_db)
-    full = rcvr_params + (f',be:name={beam}' if beam else '')
-    rcmd = [psredit_bin, '-c', full, '-m', str(ar_path)]
-    print("\nSetting archive header (psredit)")
-    print(" ".join(rcmd))
-    r = subprocess.run(rcmd, capture_output=True, text=True)
-    if r.returncode != 0:
-        print(f"    psredit FAILED (rc={r.returncode}): {r.stderr.strip()}")
-    if reverse_freqs:
-        pamcmd = [pam_bin, '--reverse_freqs', '-m', str(ar_path)]
-        print("Reversing fold channel order (pam --reverse_freqs)")
-        print(" ".join(pamcmd))
-        subprocess.run(pamcmd, capture_output=True, text=True)
     cmd = [pac_bin]
     if pac_flags:
         cmd += pac_flags.split()
@@ -912,7 +849,7 @@ def cal_files_from_database(db_path):
     """Parse a pac database (from `pac -w -k`) for the raw calibrator
     archive filenames it references.
 
-    Database line format (per cal_beam_name's existing convention):
+    Database line format:
     name type RA DEC MJD nchan cfreq bw instrument receiver -- name (col 0)
     is the file path, type (col 1) is e.g. 'PolnCal'.
 
@@ -982,13 +919,18 @@ def auto_scrunch_cal(native_db_path, fold_nchan, cal_dir,
             out_f = target_dir / out_name
             if out_f.exists():
                 # Quick sanity check: if the existing file has the
-                # wrong number of channels, delete it and redo.
+                # wrong number of channels or wrong chan_bw sign,
+                # delete it and redo.
                 try:
                     _chk = psrchive.Archive.load(str(out_f))
-                    if _chk.get_nchan() != fold_nchan:
+                    _chk_nchan = _chk.get_nchan()
+                    _chk_bw = _chk.get_bandwidth()
+                    _stale = (_chk_nchan != fold_nchan
+                              or (_chk_nchan != 0 and _chk_bw < 0))
+                    if _stale:
                         print(f"  removing stale {out_f.name} "
-                              f"(nchan={_chk.get_nchan()} != "
-                              f"fold_nchan={fold_nchan})")
+                              f"(nchan={_chk_nchan}, bw={_chk_bw:.1f})"
+                              f" != expected nchan={fold_nchan}, bw>0)")
                         out_f.unlink()
                 except Exception:
                     out_f.unlink(missing_ok=True)
@@ -1039,30 +981,51 @@ def auto_scrunch_cal(native_db_path, fold_nchan, cal_dir,
                     print(f"  then pam -f {factor} scrunch to "
                           f"{fold_nchan} ch: {' '.join(cmd)}")
                     subprocess.run(cmd, capture_output=True, text=True)
-                    # Verify pam produced the expected file.
+                    # Verify pam produced the expected file, and fix
+                    # channel-bandwidth sign if pam reversed the freq axis.
                     pam_out = str(target_dir / out_name)
                     if not Path(pam_out).exists():
                         return None, (
                             f"pam -f failed to produce {pam_out}")
                     _chk = psrchive.Archive.load(pam_out)
                     expected_bw = fold_bw_mhz / fold_nchan
-                    actual_bw = abs(_chk.get_bandwidth()) / _chk.get_nchan()
+                    chk_bw = _chk.get_bandwidth()
+                    actual_bw = abs(chk_bw) / _chk.get_nchan()
                     if abs(actual_bw - expected_bw) > 0.01:
                         return None, (
                             f"pam -f produced {pam_out} with "
                             f"chan_bw={actual_bw:.3f} MHz, expected "
                             f"{expected_bw:.3f} MHz "
                             f"(nchan={_chk.get_nchan()}, "
-                            f"bw={abs(_chk.get_bandwidth()):.1f} MHz)")
+                            f"bw={abs(chk_bw):.1f} MHz)")
+                    # pac -a requires chan_bw sign to match the fold.
+                    # The fold always has positive chan_bw (freq axis
+                    # ascending).  pam -f may reverse it; fix here.
+                    if chk_bw < 0:
+                        _chk.reverse()
+                        _chk.unload(pam_out)
+                        print(f"  reversed freq axis ({chk_bw:.1f} -> "
+                              f"{_chk.get_bandwidth():.1f} MHz)")
                     print(f"  verified: {pam_out} nchan="
                           f"{_chk.get_nchan()}, chan_bw="
                           f"{actual_bw:.3f} MHz")
                 else:
-                    print(f"\nSub-band extracted {f.name}: "
-                          f"{native_nchan} -> {sub_nchan} ch "
-                          f"(already {fold_nchan} ch), "
-                          f"centre={a.get_centre_frequency():.1f} MHz"
-                          f" -> {out_path}")
+                    # No scrunch needed; just ensure chan_bw sign is
+                    # positive (ascending freq axis, matching the fold).
+                    if a.get_bandwidth() < 0:
+                        a.reverse()
+                        a.unload(out_path)
+                        print(f"\nSub-band extracted {f.name}: "
+                              f"{native_nchan} -> {sub_nchan} ch "
+                              f"(already {fold_nchan} ch), "
+                              f"centre={a.get_centre_frequency():.1f} MHz"
+                              f", reversed freq axis -> {out_path}")
+                    else:
+                        print(f"\nSub-band extracted {f.name}: "
+                              f"{native_nchan} -> {sub_nchan} ch "
+                              f"(already {fold_nchan} ch), "
+                              f"centre={a.get_centre_frequency():.1f} MHz"
+                              f" -> {out_path}")
             else:
                 # Legacy path: assume native archive covers the fold band.
                 # Use pam -f to frequency-scrunch by an integer factor.
@@ -1340,12 +1303,7 @@ def main():
                           'sub-band already matches dspsr\'s integer-MHz grid. '
                           'Set -0.5 only when matching an un-scrunched full-band '
                           'UWL cal on the X.5-MHz grid. Only applied when '
-                          'calibrating; set 0.0 to fold on the true DADA centre.')
-    ap.add_argument('--reverse-fold-freqs', action='store_true',
-                     help='reverse the fold\'s channel order with '
-                          'pam --reverse_freqs before pac (only needed when '
-                          'the cal archives are recorded descending, i.e. the '
-                          'manual `pam --reverse_freqs -m *.ar` step)')
+                           'calibrating; set 0.0 to fold on the true DADA centre.')
     ap.add_argument('--fold-nbin', type=int, default=None,
                      help='phase bins per period for the dspsr fold. '
                           'Default: auto-computed from --fold-nchan and the '
@@ -1660,8 +1618,7 @@ def main():
                         cal_path = apply_pac(ar_path, calib=calib_file,
                                              calib_db=cal_db,
                                              pac_bin=args.pac_bin,
-                                             pac_flags=args.pac_flags,
-                                             reverse_freqs=args.reverse_fold_freqs)
+                                             pac_flags=args.pac_flags)
                         if cal_path is None:
                             if not args.keep_ar:
                                 ar_path.unlink(missing_ok=True)
@@ -1686,8 +1643,7 @@ def main():
                         cal_path = apply_pac(ar_path, calib=calib_file,
                                              calib_db=cal_db,
                                              pac_bin=args.pac_bin,
-                                             pac_flags=args.pac_flags,
-                                             reverse_freqs=args.reverse_fold_freqs)
+                                             pac_flags=args.pac_flags)
                         if cal_path is None:
                             if not args.keep_ar:
                                 ar_path.unlink(missing_ok=True)

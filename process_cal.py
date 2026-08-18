@@ -1,21 +1,11 @@
-import numpy as np
-import subprocess
 import glob
 import os
+import subprocess
 
 # dspsr -A -b 128 -L 10 -scloffs -c "0.08990380293086397554" -O J1326-4728 -e cf -U 900 -t 10 uwl_220213_144049.sf
 all_cal = glob.glob("*.cf")
 
 for filename in all_cal:
-    cmd = 'psredit -m -c type="PolnCal" %s'%filename
-    print (cmd)
-    subprocess.call(cmd, shell=True)
-
-    cmd = 'psredit -c rcvr:basis=lin,rcvr:hand=-1,rcvr:sa=0.0,rcvr:rph=0.0 -m %s'%filename
-    print (cmd)
-    subprocess.call(cmd, shell=True)
-
-    print (filename)
     output = filename + '.dzT'
     zapped = filename + '.pazi'
 
