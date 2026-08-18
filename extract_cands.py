@@ -944,12 +944,15 @@ def auto_scrunch_cal(native_db_path, fold_nchan, cal_dir,
     span the full UWL band (3328 x 1 MHz).  This function extracts the
     sub-band that matches the fold's centre frequency and bandwidth using
     psrchive's remove_chan(), then frequency-scrunches to fold_nchan with
-    fscrunch_to_nchan().  This produces an archive whose channel bandwidth
-    matches the fold exactly, satisfying pac's strict -a matching.
+    pam -f.  pam is used rather than psrchive's fscrunch_to_nchan() because
+    it reliably updates channel-bandwidth metadata, which pac's -a flag
+    requires to match exactly.
 
     If fold_bw_mhz/fold_center_mhz are not provided (legacy callers), the
     function falls back to the old pam -f factor-based scrunch assuming the
-    native archive already covers only the fold's band.
+    native archive already covers only the fold's band.  In all paths
+    pam -f is used for the frequency scrunch to ensure chan_bw metadata
+    is correct.
 
     Returns (new_db_path, note); (None, note) if the scrunch can't be done.
     """
@@ -978,7 +981,19 @@ def auto_scrunch_cal(native_db_path, fold_nchan, cal_dir,
             out_name = f.name.split('.')[0] + '.dzT'
             out_f = target_dir / out_name
             if out_f.exists():
-                continue
+                # Quick sanity check: if the existing file has the
+                # wrong number of channels, delete it and redo.
+                try:
+                    _chk = psrchive.Archive.load(str(out_f))
+                    if _chk.get_nchan() != fold_nchan:
+                        print(f"  removing stale {out_f.name} "
+                              f"(nchan={_chk.get_nchan()} != "
+                              f"fold_nchan={fold_nchan})")
+                        out_f.unlink()
+                except Exception:
+                    out_f.unlink(missing_ok=True)
+                if out_f.exists():
+                    continue
             if use_subband:
                 # Load native archive, extract sub-band, scrunch to fold_nchan.
                 a = psrchive.Archive.load(str(f))
@@ -1004,18 +1019,50 @@ def auto_scrunch_cal(native_db_path, fold_nchan, cal_dir,
                     a.remove_chan(hi_idx + 1, native_nchan - 1)
                 if lo_idx > 0:
                     a.remove_chan(0, lo_idx - 1)
-                sub_bw = native_freqs[hi_idx] - native_freqs[lo_idx] \
-                    + (native_freqs[1] - native_freqs[0])
-                # Scrunch to target nchan if needed.
-                if sub_nchan != fold_nchan:
-                    a.fscrunch_to_nchan(fold_nchan)
-                # out_name already computed above (matches *dzT glob).
+                # Unload sub-band archive, then use pam -f to scrunch
+                # (pam reliably updates chan_bw metadata; psrchive's
+                # fscrunch_to_nchan does not always do so).
                 out_path = str(target_dir / out_name)
                 a.unload(out_path)
-                print(f"\nSub-band extracted+scrunch {f.name}: "
-                      f"{native_nchan} -> {sub_nchan} -> {fold_nchan} "
-                      f"ch, centre={a.get_centre_frequency():.1f} MHz, "
-                      f"bw={a.get_bandwidth():.1f} MHz -> {out_path}")
+                if sub_nchan != fold_nchan:
+                    if sub_nchan % fold_nchan != 0:
+                        return None, (
+                            f"sub-band of {f.name} has {sub_nchan} ch "
+                            f"which is not an integer multiple of "
+                            f"fold_nchan={fold_nchan}")
+                    factor = sub_nchan // fold_nchan
+                    cmd = [pam_bin, '-f', str(factor), '-e', 'dzT',
+                           '-u', str(target_dir), out_path]
+                    print(f"\nSub-band extracted {f.name}: "
+                          f"{native_nchan} -> {sub_nchan} ch, "
+                          f"centre={a.get_centre_frequency():.1f} MHz")
+                    print(f"  then pam -f {factor} scrunch to "
+                          f"{fold_nchan} ch: {' '.join(cmd)}")
+                    subprocess.run(cmd, capture_output=True, text=True)
+                    # Verify pam produced the expected file.
+                    pam_out = str(target_dir / out_name)
+                    if not Path(pam_out).exists():
+                        return None, (
+                            f"pam -f failed to produce {pam_out}")
+                    _chk = psrchive.Archive.load(pam_out)
+                    expected_bw = fold_bw_mhz / fold_nchan
+                    actual_bw = abs(_chk.get_bandwidth()) / _chk.get_nchan()
+                    if abs(actual_bw - expected_bw) > 0.01:
+                        return None, (
+                            f"pam -f produced {pam_out} with "
+                            f"chan_bw={actual_bw:.3f} MHz, expected "
+                            f"{expected_bw:.3f} MHz "
+                            f"(nchan={_chk.get_nchan()}, "
+                            f"bw={abs(_chk.get_bandwidth()):.1f} MHz)")
+                    print(f"  verified: {pam_out} nchan="
+                          f"{_chk.get_nchan()}, chan_bw="
+                          f"{actual_bw:.3f} MHz")
+                else:
+                    print(f"\nSub-band extracted {f.name}: "
+                          f"{native_nchan} -> {sub_nchan} ch "
+                          f"(already {fold_nchan} ch), "
+                          f"centre={a.get_centre_frequency():.1f} MHz"
+                          f" -> {out_path}")
             else:
                 # Legacy path: assume native archive covers the fold band.
                 # Use pam -f to frequency-scrunch by an integer factor.
