@@ -8,19 +8,27 @@ for every zoom panel -- it is never re-found after scrunching.
 
 Usage:
     python plot_iquv_profile.py cand1_61226_999999182_dm56_67_iquv.npz [--out out.png]
+
+Can also be imported and called directly, e.g. from extract_cands.py:
+    from plot_iquv_profile import generate_profile_plot
+    generate_profile_plot(npz_path, out_path)
 """
 
 import argparse
+
+import matplotlib
 import numpy as np
-import matplotlib.pyplot as plt
 from matplotlib.gridspec import GridSpec
 
 # ----------------------------------------------------------------------
-# Config
+# Config (defaults; all overridable via generate_profile_plot() kwargs or
+# the CLI flags below)
 # ----------------------------------------------------------------------
 PA_SIGMA_THRESH = 3.0          # only plot PA where L/sigma_L exceeds this
-ZOOM_HALF_WIDTH_NATIVE = 600   # +/- native samples shown at 1x zoom (tight!)
+ZOOM_HALF_WIDTH_NATIVE = 200   # +/- native samples shown at 1x zoom (tight!)
 SCRUNCH_FACTORS = [1, 2, 4, 6, 8, 10, 12, 16, 20]
+ZOOM_NCOLS = 2                 # number of columns in the zoom-panel grid
+DSPEC_INTERPOLATION = "gaussian"  # matplotlib imshow interpolation for the dspec
 
 
 def debias_L(Q, U, sigma):
@@ -62,17 +70,25 @@ def tscrunch_1d(arr, factor):
     return arr[:n_keep].reshape(-1, factor).mean(axis=1)
 
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("npz_file")
-    ap.add_argument("--out", default=None, help="output PNG path")
-    ap.add_argument("--pa-thresh", type=float, default=PA_SIGMA_THRESH,
-                     help="L/sigma_L threshold to show PA points")
-    ap.add_argument("--zoom-half-width", type=int, default=ZOOM_HALF_WIDTH_NATIVE,
-                     help="+/- native samples shown in the 1x zoom panel")
-    args = ap.parse_args()
+def generate_profile_plot(npz_file, out=None, pa_thresh=PA_SIGMA_THRESH,
+                           zoom_half_width=ZOOM_HALF_WIDTH_NATIVE,
+                           zoom_ncols=ZOOM_NCOLS,
+                           dspec_interp=DSPEC_INTERPOLATION,
+                           scrunch_factors=None, title_suffix='', dpi=150):
+    """Build the full diagnostic figure for one candidate .npz and save it.
 
-    d = np.load(args.npz_file, allow_pickle=True)
+    npz_file: path to a candidate _iquv.npz written by extract_cands.py
+    out: output PNG path (default: npz_file with _iquv.npz -> _profile.png)
+    title_suffix: appended to the plot title (e.g. calibration status)
+
+    Returns the output path.
+    """
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+
+    scrunch_factors = scrunch_factors or SCRUNCH_FACTORS
+
+    d = np.load(str(npz_file), allow_pickle=True)
 
     stokes = d["stokes"]              # (4, nchan, nsamp) -> I, Q, U, V
     pol_order = [p for p in d["pol_order"]]
@@ -106,15 +122,14 @@ def main():
 
     # Frequency axis (for labeling / dspec extent)
     freqs = fch1 + foff * np.arange(nchan)
-    fmin, fmax = min(freqs[0], freqs[-1]), max(freqs[0], freqs[-1])
 
     # ------------------------------------------------------------------
     # Frequency-averaged (band-integrated) time series, native resolution
     # ------------------------------------------------------------------
-    I_prof = I.mean(axis=0)
-    Q_prof = Q.mean(axis=0)
-    U_prof = U.mean(axis=0)
-    V_prof = V.mean(axis=0) if V is not None else None
+    I_prof = I.sum(axis=0)
+    Q_prof = Q.sum(axis=0)
+    U_prof = U.sum(axis=0)
+    V_prof = V.sum(axis=0) if V is not None else None
 
     time_native = np.arange(nsamp) * tsamp_s * 1e3  # ms
 
@@ -126,7 +141,7 @@ def main():
     peak_idx_native = int(np.argmax(I_prof))
 
     # On-pulse window (native samples) around the peak, for off-pulse stats
-    width_ms = float(d["cand_width_ms"])
+    width_ms = float(d["cand_width_ms"]) if "cand_width_ms" in d and d["cand_width_ms"] is not None else 0.0
     if width_ms and width_ms > 0:
         half_on_native = max(int((width_ms * 1e-3 / tsamp_s) * 1.5), 20)
     else:
@@ -145,26 +160,32 @@ def main():
     PA_prof = 0.5 * np.degrees(np.arctan2(U_prof, Q_prof))
     L_meas = np.sqrt(Q_prof ** 2 + U_prof ** 2)
     L_sig = np.divide(L_meas, sigma_QU, out=np.zeros_like(L_meas), where=sigma_QU > 0)
-    pa_mask = L_sig > args.pa_thresh
+    pa_mask = L_sig > pa_thresh
 
     # ==================================================================
     # FIGURE LAYOUT
     #   Left column : PA / I+L / dynamic-spectrum (native resolution, full window)
-    #   Right column: stack of landscape zoom panels, one per tscrunch
-    #                 factor, each with its own mini PA row + I/L row,
-    #                 all centered on the SAME peak.
+    #   Right side  : grid of landscape zoom panels (2 columns), one per
+    #                 tscrunch factor, each with its own mini PA row +
+    #                 I/L row, all centered on the SAME peak.
     # ==================================================================
-    n_zoom = len(SCRUNCH_FACTORS)
-    fig = plt.figure(figsize=(18, 3.0 * n_zoom))
+    n_zoom = len(scrunch_factors)
+    ncols = max(zoom_ncols, 1)
+    nrows = int(np.ceil(n_zoom / ncols))
+
+    row_h = 2.6                       # inches per zoom row
+    fig_h = max(row_h * nrows, 8.0)
+    fig_w = 9 + 5.5 * ncols
+    fig = plt.figure(figsize=(fig_w, fig_h))
 
     gs_outer = GridSpec(
-        1, 2, width_ratios=[1.1, 1.6], wspace=0.18,
-        figure=fig, top=0.96, bottom=0.05, left=0.06, right=0.98,
+        1, 2, width_ratios=[1.0, 1.15 * ncols], wspace=0.16,
+        figure=fig, top=0.95, bottom=0.06, left=0.055, right=0.98,
     )
 
-    # ---- Left column: main overview plot ----
+    # ---- Left column: main overview plot (kept compact, not over-stretched) ----
     gs_left = gs_outer[0, 0].subgridspec(
-        3, 1, height_ratios=[1.0, 1.6, 2.4], hspace=0.08
+        3, 1, height_ratios=[1.0, 1.3, 1.6], hspace=0.10
     )
     ax_pa = fig.add_subplot(gs_left[0, 0])
     ax_prof = fig.add_subplot(gs_left[1, 0], sharex=ax_pa)
@@ -175,9 +196,10 @@ def main():
     ax_pa.set_ylabel("PA (deg)")
     ax_pa.set_ylim(-90, 90)
     ax_pa.tick_params(labelbottom=False)
-    ax_pa.set_title(
-        f"Cand {cand_id}  MJD {cand_mjd:.6f}  DM {cand_dm:.2f}  SNR {cand_snr:.1f}"
-    )
+    title = f"Cand {cand_id}  MJD {cand_mjd:.6f}  DM {cand_dm:.2f}  SNR {cand_snr:.1f}"
+    if title_suffix:
+        title += f"  {title_suffix}"
+    ax_pa.set_title(title)
 
     # ---- I / L profile panel ----
     ax_prof.plot(time_native, I_prof, color="k", lw=0.8, label="I")
@@ -189,13 +211,18 @@ def main():
     ax_prof.legend(loc="upper right", fontsize=8, frameon=False)
     ax_prof.tick_params(labelbottom=False)
 
-    # ---- Dynamic spectrum panel ----
-    extent = [time_native[0], time_native[-1], fmin, fmax]
+    # ---- Dynamic spectrum panel (matplotlib-interpolated for display only) ----
+    # NOTE on frequency orientation: freqs[0] corresponds to array row 0 and
+    # equals fch1_mhz (foff_mhz is typically negative, so freqs descends).
+    # origin='upper' places row 0 at the TOP of the image, so we must give
+    # the extent's top value as freqs[0] (not fmax blindly).
+    extent = [time_native[0], time_native[-1], freqs[-1], freqs[0]]
     vmax = np.percentile(I, 99.5)
     vmin = np.percentile(I, 5)
     ax_dspec.imshow(
-        I, aspect="auto", origin="lower", extent=extent,
-        cmap="viridis", vmin=vmin, vmax=vmax, interpolation='none'
+        I, aspect="auto", origin="upper", extent=extent,
+        cmap="viridis", vmin=vmin, vmax=vmax,
+        interpolation=dspec_interp,
     )
     ax_dspec.set_ylabel("Freq (MHz)")
     ax_dspec.set_xlabel("Time (ms)")
@@ -205,19 +232,23 @@ def main():
         ax.axvline(peak_t_ms, color="orange", lw=0.6, ls="--", alpha=0.7)
 
     # ==================================================================
-    # RIGHT COLUMN: stacked landscape zoom panels (tscrunch series)
-    # Each zoom "row" is itself split into a PA sub-row and an I/L
-    # sub-row, sharing the x-axis. The peak index is transformed by
-    # integer division only -- never re-found after scrunching.
+    # RIGHT SIDE: grid of landscape zoom panels (tscrunch series), laid
+    # out in `ncols` columns. Each zoom "cell" is itself split into a PA
+    # sub-row and an I/L sub-row, sharing the x-axis. The peak index is
+    # transformed by integer division only -- never re-found after
+    # scrunching.
     # ==================================================================
-    gs_zoom_stack = gs_outer[0, 1].subgridspec(n_zoom, 1, hspace=0.35)
+    gs_zoom_grid = gs_outer[0, 1].subgridspec(
+        nrows, ncols, hspace=0.55, wspace=0.22
+    )
 
-    for row, factor in enumerate(SCRUNCH_FACTORS):
-        gs_row = gs_zoom_stack[row, 0].subgridspec(
+    for i, factor in enumerate(scrunch_factors):
+        row, col = divmod(i, ncols)
+        gs_cell = gs_zoom_grid[row, col].subgridspec(
             2, 1, height_ratios=[1.0, 1.6], hspace=0.0
         )
-        ax_pa_z = fig.add_subplot(gs_row[0, 0])
-        ax_prof_z = fig.add_subplot(gs_row[1, 0], sharex=ax_pa_z)
+        ax_pa_z = fig.add_subplot(gs_cell[0, 0])
+        ax_prof_z = fig.add_subplot(gs_cell[1, 0], sharex=ax_pa_z)
 
         # ---- tscrunch band-averaged I, Q, U (and V) ----
         I_scr = tscrunch_1d(I_prof, factor)
@@ -242,10 +273,10 @@ def main():
         L_meas_scr = np.sqrt(Q_scr ** 2 + U_scr ** 2)
         L_sig_scr = np.divide(L_meas_scr, sigma_QU_scr,
                                out=np.zeros_like(L_meas_scr), where=sigma_QU_scr > 0)
-        pa_mask_scr = L_sig_scr > args.pa_thresh
+        pa_mask_scr = L_sig_scr > pa_thresh
 
         # zoom window, in scrunched-sample units, always centered on peak_idx_scr
-        half_width_scr = max(args.zoom_half_width // factor, 5)
+        half_width_scr = max(zoom_half_width // factor, 5)
         lo = max(peak_idx_scr - half_width_scr, 0)
         hi = min(peak_idx_scr + half_width_scr, I_scr.shape[0])
 
@@ -268,7 +299,7 @@ def main():
         ax_pa_z.tick_params(labelbottom=False, labelsize=7)
         ax_pa_z.set_ylabel("PA", fontsize=8)
         ax_pa_z.set_title(
-            f"{factor}x  ({tsamp_scr*1e6:.2f} \u00b5s/samp)   S/N={snr_scr:.1f}",
+            f"{factor}x  ({tsamp_scr*1e6:.2f} \u00b5s)   S/N={snr_scr:.1f}",
             fontsize=9,
         )
 
@@ -285,11 +316,35 @@ def main():
         ax_prof_z.set_ylabel("Flux", fontsize=8)
         ax_prof_z.set_xlabel("Time from peak (ms)", fontsize=8)
         ax_prof_z.tick_params(labelsize=7)
-        if row == 0:
+        if i == 0:
             ax_prof_z.legend(loc="upper right", fontsize=7, frameon=False)
 
-    out_path = args.out or args.npz_file.rsplit(".", 1)[0] + "_profile.png"
-    fig.savefig(out_path, dpi=150)
+    out_path = out or str(npz_file).rsplit(".", 1)[0] + "_profile.png"
+    fig.savefig(out_path, dpi=dpi)
+    plt.close(fig)
+    return out_path
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("npz_file")
+    ap.add_argument("--out", default=None, help="output PNG path")
+    ap.add_argument("--pa-thresh", type=float, default=PA_SIGMA_THRESH,
+                     help="L/sigma_L threshold to show PA points")
+    ap.add_argument("--zoom-half-width", type=int, default=ZOOM_HALF_WIDTH_NATIVE,
+                     help="+/- native samples shown in the 1x zoom panel")
+    ap.add_argument("--zoom-ncols", type=int, default=ZOOM_NCOLS,
+                     help="number of columns in the zoom-panel grid")
+    ap.add_argument("--dspec-interp", default=DSPEC_INTERPOLATION,
+                     help="matplotlib imshow interpolation for the dspec "
+                          "(e.g. gaussian, bilinear, bicubic, none)")
+    args = ap.parse_args()
+
+    out_path = generate_profile_plot(
+        args.npz_file, out=args.out, pa_thresh=args.pa_thresh,
+        zoom_half_width=args.zoom_half_width, zoom_ncols=args.zoom_ncols,
+        dspec_interp=args.dspec_interp,
+    )
     print(f"Saved: {out_path}")
 
 
