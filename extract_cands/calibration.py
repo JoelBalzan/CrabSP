@@ -295,7 +295,7 @@ def resolve_calibration(args, cal_dir, fold_bw_mhz=0.0,
     if db_path.exists():
         note = f"using existing calibration database {db_path}"
         scrunched_db, scrunch_note = auto_scrunch_cal(
-            db_path, args.fold_nchan, cal_dir,
+            db_path, args.nchan, cal_dir,
             fold_bw_mhz=fold_bw_mhz, fold_center_mhz=fold_center_mhz,
             pam_bin=args.pam_bin, pac_bin=args.pac_bin,
             pac_flags=args.pac_flags)

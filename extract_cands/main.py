@@ -33,8 +33,6 @@ def main():
                      help='merge candidates into one event when consecutive MJDs are '
                           'less than this far apart (ms). default 3 ms')
     ap.add_argument('--digifil-bin', default='digifil')
-    ap.add_argument('--digifil-fft', '--df-fft', '-F', type=int, default=32,
-                     help='digifil FFT factor (-F), i.e. number of channels.')
     ap.add_argument('--digifil-min-block', '--df-min-block', type=float, default=0.5,
                      help='minimum duration (s) to request from digifil per call.')
     ap.add_argument('--keep-fil', action='store_true',
@@ -64,8 +62,9 @@ def main():
                      help='shift (MHz) of the fold centre frequency for pac alignment')
     ap.add_argument('--fold-nbin', type=int, default=None,
                      help='phase bins per period. Default: auto-computed.')
-    ap.add_argument('--fold-nchan', type=int, default=8,
-                     help='fold channels (-F)')
+    ap.add_argument('-F', '--nchan', type=int, default=8,
+                     help='number of channels for both digifil (-F) and '
+                          'dspsr (-F) extraction')
     ap.add_argument('--fold-period', type=float, default=0.0334,
                      help='fold period (s)')
     ap.add_argument('--fold-parfile', default=None, metavar='FILE',
@@ -122,9 +121,9 @@ def main():
         dada_hdr = parse_dada_header(frags[0]['dada_path'])
         bw_mhz = abs(float(dada_hdr.get('BW', 0.0)))
         if bw_mhz > 0:
-            chan_bw_hz = bw_mhz * 1e6 / args.fold_nchan
+            chan_bw_hz = bw_mhz * 1e6 / args.nchan
             args.fold_nbin = int(np.ceil(args.fold_period * chan_bw_hz))
-            print(f"  auto --fold-nbin: {bw_mhz:.0f} MHz / {args.fold_nchan} "
+            print(f"  auto --fold-nbin: {bw_mhz:.0f} MHz / {args.nchan} "
                   f"ch = {chan_bw_hz/1e6:.1f} MHz/ch -> "
                   f"nbin = {args.fold_nbin} "
                   f"({args.fold_period / args.fold_nbin * 1e6:.2f} us/bin)")
@@ -223,7 +222,7 @@ def _process_dspsr(c, event, i_event, n_events, frag, offset_s,
     print(f"  fold parfile          : {args.fold_parfile or '(none, using -c/-cepoch)'}")
     print(f"  fold turns            : {turns}")
     print(f"  fold bins             : {args.fold_nbin}")
-    print(f"  fold nchan            : {args.fold_nchan}")
+    print(f"  fold nchan            : {args.nchan}")
     print(f"  fold files            : {[p.name for p in dada_paths]}")
 
     outname = f"cand{c['cand_id']}_{c['mjd']:.9f}_dm{c['dm']:.2f}"
@@ -258,7 +257,7 @@ def _process_dspsr(c, event, i_event, n_events, frag, offset_s,
 
         ar_path = fold_cutout(
             fold_dada_paths, seek_mjd, c['dm'], period,
-            args.fold_nbin, args.fold_nchan, turns,
+            args.fold_nbin, args.nchan, turns,
             outname, outdir, dspsr_bin=args.dspsr_bin,
             cf_offset_mhz=(
                 args.fold_cf_offset
@@ -284,7 +283,7 @@ def _process_dspsr(c, event, i_event, n_events, frag, offset_s,
                   "UNCALIBRATED fast fold)")
     else:
         ar_path = fold_cutout(dada_paths, seek_mjd, c['dm'], period,
-                              args.fold_nbin, args.fold_nchan, turns,
+                              args.fold_nbin, args.nchan, turns,
                               outname, outdir, dspsr_bin=args.dspsr_bin,
                               cf_offset_mhz=(
                                   args.fold_cf_offset
@@ -379,13 +378,13 @@ def _process_dspsr(c, event, i_event, n_events, frag, offset_s,
         fold_parfile=str(args.fold_parfile or ''),
         fold_turns=turns,
         fold_nbin=args.fold_nbin,
-        fold_nchan=args.fold_nchan,
+        fold_nchan=args.nchan,
         rm=(args.rm if args.rm is not None else np.nan),
     )
     print(f"    saved -> {npz_path}  shape={stokes.shape} (pol,chan,samp)")
 
     if args.plot:
-        _generate_plot(npz_path, outname, outdir, base_outdir,
+        _generate_plot(npz_path, outname, outdir,
                        calib_file, cal_db, args)
 
     if not args.keep_ar:
@@ -397,9 +396,9 @@ def _process_dspsr(c, event, i_event, n_events, frag, offset_s,
 def _calibrate_archive(ar_path, calib_file, cal_db, args, fold_bw_mhz):
     """Apply calibration to a dspsr archive. Returns calibrated path or None."""
     fix_dspsr_receiver(ar_path, psredit_bin=args.psredit_bin)
-    _exp_cbw = (fold_bw_mhz / args.fold_nchan
+    _exp_cbw = (fold_bw_mhz / args.nchan
                 if fold_bw_mhz > 0 else 0.0)
-    fscrunch_to_nchan(ar_path, args.fold_nchan,
+    fscrunch_to_nchan(ar_path, args.nchan,
                       expected_chan_bw=_exp_cbw,
                       pam_bin=args.pam_bin,
                       psredit_bin=args.psredit_bin)
@@ -407,7 +406,7 @@ def _calibrate_archive(ar_path, calib_file, cal_db, args, fold_bw_mhz):
     if cal_db:
         _cal_dzts = list(Path(cal_db).parent.glob('*.dzT'))
         if _cal_dzts:
-            fix_archive_frequencies(ar_path, _cal_dzts[0], args.fold_nchan)
+            fix_archive_frequencies(ar_path, _cal_dzts[0], args.nchan)
     cal_path = apply_pac(ar_path, calib=calib_file,
                          calib_db=cal_db,
                          pac_bin=args.pac_bin,
@@ -457,7 +456,7 @@ def _process_digifil(c, event, i_event, n_events, frag, offset_s,
     fil_cutout = extract_cutout(dada_paths, digifil_seek_s, digifil_dur_s,
                                  c['dm'], outname, outdir,
                                  digifil_bin=args.digifil_bin,
-                                 fft=args.digifil_fft)
+                                 fft=args.nchan)
     if fil_cutout is None:
         return
 
@@ -548,9 +547,7 @@ def _process_digifil(c, event, i_event, n_events, frag, offset_s,
     print(f"    saved -> {npz_path}  shape={stokes.shape} (pol,chan,samp)")
 
     if args.plot:
-        plot_outdir = base_outdir / 'profiles'
-        plot_outdir.mkdir(parents=True, exist_ok=True)
-        png_path = plot_outdir / f"{outname}_profile.png"
+        png_path = outdir / f"{outname}_profile.png"
         try:
             generate_profile_plot(npz_path, out=str(png_path),
                                    title_suffix="[digifil, uncalibrated]")
@@ -562,14 +559,11 @@ def _process_digifil(c, event, i_event, n_events, frag, offset_s,
         fil_cutout.unlink(missing_ok=True)
 
 
-def _generate_plot(npz_path, outname, outdir, base_outdir,
-                   calib_file, cal_db, args):
+def _generate_plot(npz_path, outname, outdir, calib_file, cal_db, args):
     """Generate polarimetric profile plot."""
     from plot_iquv_profile import generate_profile_plot
 
-    plot_outdir = base_outdir / 'profiles'
-    plot_outdir.mkdir(parents=True, exist_ok=True)
-    png_path = plot_outdir / f"{outname}_profile.png"
+    png_path = outdir / f"{outname}_iquv_profile.png"
     cal_applied_now = bool(calib_file or cal_db)
     cal_tag = 'calibrated' if cal_applied_now else 'UNCALIBRATED'
     if args.fast_pac:

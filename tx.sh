@@ -70,7 +70,7 @@ for MODE in "${MODES[@]}"; do
     MINW=0.0000005
     MAXW=0.00005
     LENGTH=1
-    THRE=7
+    THRE=10
     ;;
   1us)
     ROOT="crab_1us"
@@ -78,7 +78,7 @@ for MODE in "${MODES[@]}"; do
     MINW=0.000001
     MAXW=0.0001
     LENGTH=1
-    THRE=7
+    THRE=10
     ;;
   4us)
     ROOT="crab_4us"
@@ -86,7 +86,7 @@ for MODE in "${MODES[@]}"; do
     MINW=0.000004
     MAXW=0.0005
     LENGTH=2
-    THRE=7
+    THRE=10
     ;;
   5us)
     ROOT="crab_5us"
@@ -94,7 +94,7 @@ for MODE in "${MODES[@]}"; do
     MINW=0.000005
     MAXW=0.0005
     LENGTH=2
-    THRE=7
+    THRE=10
     ;;
   10us)
     ROOT="crab_10us"
@@ -102,7 +102,7 @@ for MODE in "${MODES[@]}"; do
     MINW=0.00001
     MAXW=0.003
     LENGTH=5
-    THRE=7
+    THRE=10
     ;;
   20us)
     ROOT="crab_20us"
@@ -110,7 +110,7 @@ for MODE in "${MODES[@]}"; do
     MINW=0.00002
     MAXW=0.006
     LENGTH=9.65
-    THRE=7
+    THRE=10
     ;;
   40us)
     ROOT="crab_40us"
@@ -118,7 +118,7 @@ for MODE in "${MODES[@]}"; do
     MINW=0.00004
     MAXW=0.02
     LENGTH=9.65
-    THRE=7
+    THRE=10
     ;;
   esac
 
