@@ -45,12 +45,15 @@ def apply_pac(ar_path, calib=None, calib_db=None, pac_bin='pac',
 def find_cal_extensions(cal_dir):
     """Extensions of calibration material present in cal_dir, in pac search order.
 
-    .dzT (tscrunched, zapped cal obs) is preferred over raw .cf; avfluxcal
-    and pcm are included when present.
+    .dzT.pazi (tscrunched, zapped, intensity-calibrated) is preferred over
+    .dzT (tscrunched, zapped) over raw .cf; avfluxcal and pcm are included
+    when present.
     """
     cal_dir = Path(cal_dir)
     exts = []
-    if any(cal_dir.glob('*.dzT')):
+    if any(cal_dir.glob('*.dzT.pazi')):
+        exts.append('dzT.pazi')
+    elif any(cal_dir.glob('*.dzT')):
         exts.append('dzT')
     elif any(cal_dir.glob('*.cf')):
         exts.append('cf')
@@ -310,7 +313,7 @@ def resolve_calibration(args, cal_dir, fold_bw_mhz=0.0,
     if db_path is None:
         return None, None, f"WARNING: {note} — saving UNCALIBRATED folds"
     scrunched_db, scrunch_note = auto_scrunch_cal(
-        db_path, args.fold_nchan, cal_dir,
+        db_path, args.nchan, cal_dir,
         fold_bw_mhz=fold_bw_mhz, fold_center_mhz=fold_center_mhz,
         pam_bin=args.pam_bin, pac_bin=args.pac_bin,
         pac_flags=args.pac_flags)

@@ -23,6 +23,12 @@ else
   exit 1
 fi
 
+DO_REPLOT=${DO_REPLOT:-1}
+REPLOT_DM_CUTOFF=${REPLOT_DM_CUTOFF:-0}
+REPLOT_DDM_CUTOFF=${REPLOT_DDM_CUTOFF:-5}
+REPLOT_SNRCUTOFF=${REPLOT_SNRCUTOFF:-0}
+REPLOT_WIDTHCUTOFF=${REPLOT_WIDTHCUTOFF:-0}
+
 # Find all filterbanks once, in chronological order
 mapfile -t FILES < <(find "$PWD" -maxdepth 1 -name "*.fil" | sort)
 
@@ -184,8 +190,29 @@ for MODE in "${MODES[@]}"; do
     --maxncand 100 \
     -f "${FILES[@]}"
 
-  if [[ -s "$cands_file" ]]; then
-    echo "  replot_fil disabled (segfaults on width-0 candidates); using search candidates directly"
+  if [[ -s "$cands_file" ]] && (( DO_REPLOT )); then
+    # replot_fil divides by the cand width; widths < 0.005 ms get written as
+    # 0.00 in the .cands file (2dp) -> SIGFPE.  Replace 0.00 with the search
+    # resolution so replot_fil doesn't crash.
+    MIN_WIDTH_MS=$(awk "BEGIN{printf \"%.4f\", ${TSEARCH} * 1000}")
+    awk -F'\t' -v mw="$MIN_WIDTH_MS" 'BEGIN{OFS="\t"} $5=="0.00" {$5=mw} {print}' \
+      "$cands_file" > "${cands_file}.tmp" && mv "${cands_file}.tmp" "$cands_file"
+
+    echo "  running replot_fil -c (dmcutoff=$REPLOT_DM_CUTOFF ddcutoff=$REPLOT_DDM_CUTOFF snrcutoff=$REPLOT_SNRCUTOFF widthcutoff=$REPLOT_WIDTHCUTOFF)"
+    BEFORE=$(wc -l < "$cands_file")
+    replot_fil -f "${FILES[@]}" \
+      --candfile "$cands_file" \
+      -c \
+      --cont \
+      --dmcutoff "$REPLOT_DM_CUTOFF" \
+      --ddmcutoff "$REPLOT_DDM_CUTOFF" \
+      --snrcutoff "$REPLOT_SNRCUTOFF" \
+      --widthcutoff "$REPLOT_WIDTHCUTOFF" \
+      -t "$(nproc)"
+    AFTER=$(wc -l < "$cands_file")
+    echo "  cands: $BEFORE -> $AFTER after replot_fil cleaning"
+  elif [[ -s "$cands_file" ]]; then
+    echo "  replot_fil skipped (DO_REPLOT=0)"
   else
     echo "  WARNING: no cands file written by search" >&2
   fi

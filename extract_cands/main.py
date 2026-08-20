@@ -22,7 +22,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--cand-dir', default=None,
                 help='recursively search this directory for *.cands files')
-    ap.add_argument('--cand_files', nargs='+')
+    ap.add_argument('--cand-files', nargs='+')
     ap.add_argument('--workdir', default='.')
     ap.add_argument('--outdir', default='cutouts')
     ap.add_argument('--window-s', type=float, default=0.006,
@@ -81,6 +81,8 @@ def main():
                      help='minimum crop duration (s) for --fast-pac')
     ap.add_argument('--rm', type=float, default=None,
                      help='rotation measure for coherent Faraday correction')
+    ap.add_argument('--dm', type=float, default=None,
+                     help='override DM (pc/cm3) for all candidates')
 
     args = ap.parse_args()
     use_dspsr = args.method == 'dspsr' or bool(args.calib or args.calib_db)
@@ -169,6 +171,8 @@ def main():
               f"{n_cands / max(n_events, 1):.1f} detections/event)")
         for i_event, event in enumerate(events):
             c = pick_representative(event)
+            if args.dm is not None:
+                c['dm'] = args.dm
 
             frag, offset_s = find_fragment(frags, stream_root, c['mjd'])
 

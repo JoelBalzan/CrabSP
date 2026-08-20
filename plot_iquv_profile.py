@@ -75,6 +75,55 @@ def tscrunch_1d(arr, factor):
     return arr[:n_keep].reshape(-1, factor).mean(axis=1)
 
 
+def calculate_pa(Q, U, pa_mask, unwrap=False):
+    """
+    Calculate PA in degrees, with PA defined modulo 180 deg.
+
+    When unwrap=True, only significant PA samples are used for unwrapping.
+    Unwrapping is performed independently for each contiguous region of
+    significant samples, preventing low-S/N samples or gaps from introducing
+    artificial 180-deg offsets.
+    """
+    pa = 0.5 * np.degrees(np.arctan2(U, Q))
+    pa_plot = np.full_like(pa, np.nan, dtype=float)
+
+    valid_idx = np.flatnonzero(pa_mask)
+
+    if valid_idx.size == 0:
+        return pa_plot
+
+    if not unwrap:
+        pa_plot[valid_idx] = pa[valid_idx]
+        return pa_plot
+
+    # Find contiguous runs of significant samples.
+    breaks = np.where(np.diff(valid_idx) > 1)[0] + 1
+    runs = np.split(valid_idx, breaks)
+
+    for run in runs:
+        if run.size == 0:
+            continue
+
+        pa_rad = np.radians(pa[run])
+        pa_unwrapped = np.unwrap(pa_rad, period=np.pi)
+        pa_plot[run] = np.degrees(pa_unwrapped)
+
+    return pa_plot
+
+def plot_pa_segments(ax, t, pa, mask, **kwargs):
+    """Plot PA as separate lines for each contiguous significant region."""
+    idx = np.flatnonzero(mask)
+
+    if idx.size == 0:
+        return
+
+    breaks = np.where(np.diff(idx) > 1)[0] + 1
+    runs = np.split(idx, breaks)
+
+    for run in runs:
+        if run.size >= 2:
+            ax.plot(t[run], pa[run], **kwargs)
+
 def generate_profile_plot(npz_file, out=None, pa_thresh=PA_SIGMA_THRESH,
                            zoom_half_width=ZOOM_HALF_WIDTH_NATIVE,
                            zoom_ncols=ZOOM_NCOLS,
@@ -166,14 +215,26 @@ def generate_profile_plot(npz_file, out=None, pa_thresh=PA_SIGMA_THRESH,
     sigma_I = off_pulse_rms(I_prof, on_lo, on_hi)
 
     L_prof = debias_L(Q_prof, U_prof, sigma_QU)
-    PA_prof = 0.5 * np.degrees(np.arctan2(U_prof, Q_prof))
-    if unwrap_pa:
-        PA_prof = np.unwrap(np.radians(PA_prof), period=np.pi)
-        PA_prof = np.degrees(PA_prof)
-    L_meas = np.sqrt(Q_prof ** 2 + U_prof ** 2)
-    L_sig = np.divide(L_meas, sigma_QU, out=np.zeros_like(L_meas), where=sigma_QU > 0)
-    I_sig = np.divide(I_prof, sigma_I, out=np.zeros_like(I_prof), where=sigma_I > 0)
+    
+    L_meas = np.sqrt(Q_prof**2 + U_prof**2)
+    L_sig = np.divide(
+        L_meas,
+        sigma_QU,
+        out=np.zeros_like(L_meas),
+        where=sigma_QU > 0,
+    )
+    I_sig = np.divide(
+        I_prof,
+        sigma_I,
+        out=np.zeros_like(I_prof),
+        where=sigma_I > 0,
+    )
+    
+    # Only use statistically significant samples for PA.
     pa_mask = (L_sig > pa_thresh) & (I_sig > 3.0)
+    
+    # Calculate / unwrap PA only after masking.
+    PA_prof = calculate_pa(Q_prof, U_prof, pa_mask, unwrap=unwrap_pa)
 
     # PA error bars: sigma_PA = 0.5 * sigma_QU / L (in degrees)
     sigma_PA_deg = np.full(nsamp, 90.0)
@@ -294,15 +355,29 @@ def generate_profile_plot(npz_file, out=None, pa_thresh=PA_SIGMA_THRESH,
         sigma_I_scr = off_pulse_rms(I_scr, on_lo_scr, on_hi_scr)
 
         L_scr = debias_L(Q_scr, U_scr, sigma_QU_scr)
-        PA_scr = 0.5 * np.degrees(np.arctan2(U_scr, Q_scr))
-        if unwrap_pa:
-            PA_scr = np.unwrap(np.radians(PA_scr), period=np.pi)
-            PA_scr = np.degrees(PA_scr)
-        L_meas_scr = np.sqrt(Q_scr ** 2 + U_scr ** 2)
-        L_sig_scr = np.divide(L_meas_scr, sigma_QU_scr,
-                               out=np.zeros_like(L_meas_scr), where=sigma_QU_scr > 0)
-        I_sig_scr = np.divide(I_scr, sigma_I_scr, out=np.zeros_like(I_scr), where=sigma_I_scr > 0)
+
+        L_meas_scr = np.sqrt(Q_scr**2 + U_scr**2)
+        L_sig_scr = np.divide(
+            L_meas_scr,
+            sigma_QU_scr,
+            out=np.zeros_like(L_meas_scr),
+            where=sigma_QU_scr > 0,
+        )
+        I_sig_scr = np.divide(
+            I_scr,
+            sigma_I_scr,
+            out=np.zeros_like(I_scr),
+            where=sigma_I_scr > 0,
+        )
+
         pa_mask_scr = (L_sig_scr > pa_thresh) & (I_sig_scr > 3.0)
+
+        PA_scr = calculate_pa(
+            Q_scr,
+            U_scr,
+            pa_mask_scr,
+            unwrap=unwrap_pa,
+        )
 
         # PA error bars for zoom panel
         sigma_PA_scr = np.full(I_scr.shape[0], 90.0)
@@ -331,7 +406,16 @@ def generate_profile_plot(npz_file, out=None, pa_thresh=PA_SIGMA_THRESH,
                          ecolor='gray', elinewidth=0.5, capsize=2, zorder=1)
         ax_pa_z.scatter(t_scr[sl][pa_mask_scr[sl]], PA_scr[sl][pa_mask_scr[sl]],
                          s=8, c="k", zorder=2)
-        ax_pa_z.plot(t_scr[sl][pa_mask_scr[sl]], PA_scr[sl][pa_mask_scr[sl]], color="k", lw=0.8, alpha=0.5)
+        #ax_pa_z.plot(t_scr[sl][pa_mask_scr[sl]], PA_scr[sl][pa_mask_scr[sl]], color="k", lw=0.8, alpha=0.5)
+        plot_pa_segments(
+            ax_pa_z,
+            t_scr[sl],
+            PA_scr[sl],
+            pa_mask_scr[sl],
+            color="k",
+            lw=0.8,
+            alpha=0.5,
+        )
         ax_pa_z.axvline(0, color="orange", lw=0.7, ls="--", alpha=0.7)
         if not unwrap_pa:
             ax_pa_z.set_ylim(-90, 90)
