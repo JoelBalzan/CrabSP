@@ -193,8 +193,9 @@ for MODE in "${MODES[@]}"; do
   if [[ -s "$cands_file" ]] && (( DO_REPLOT )); then
     # replot_fil divides by the cand width; widths < 0.005 ms get written as
     # 0.00 in the .cands file (2dp) -> SIGFPE.  Replace 0.00 with the search
-    # resolution so replot_fil doesn't crash.
+    # resolution on a copy so the original is preserved.
     MIN_WIDTH_MS=$(awk "BEGIN{printf \"%.4f\", ${TSEARCH} * 1000}")
+    cp "$cands_file" "${cands_file}.orig"
     awk -F'\t' -v mw="$MIN_WIDTH_MS" 'BEGIN{OFS="\t"} $5=="0.00" {$5=mw} {print}' \
       "$cands_file" > "${cands_file}.tmp" && mv "${cands_file}.tmp" "$cands_file"
 
@@ -204,14 +205,13 @@ for MODE in "${MODES[@]}"; do
       --candfile "$cands_file" \
       -c \
       --cont \
-      --zdot \
       --dmcutoff "$REPLOT_DM_CUTOFF" \
       --ddmcutoff "$REPLOT_DDM_CUTOFF" \
-      --snrcutoff 0 \
+      --snrcutoff "$REPLOT_SNRCUTOFF" \
       --widthcutoff "$REPLOT_WIDTHCUTOFF" \
       -t "$(nproc)"
     AFTER=$(wc -l < "$cands_file")
-    echo "  cands: $BEFORE -> $AFTER after replot_fil cleaning"
+    echo "  cands: $BEFORE -> $AFTER after replot_fil"
   elif [[ -s "$cands_file" ]]; then
     echo "  replot_fil skipped (DO_REPLOT=0)"
   else
