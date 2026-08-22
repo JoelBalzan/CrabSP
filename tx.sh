@@ -25,7 +25,7 @@ fi
 
 DO_REPLOT=${DO_REPLOT:-1}
 REPLOT_DM_CUTOFF=${REPLOT_DM_CUTOFF:-0}
-REPLOT_DDM_CUTOFF=${REPLOT_DDM_CUTOFF:-5}
+REPLOT_DDM_CUTOFF=${REPLOT_DDM_CUTOFF:-10}
 REPLOT_SNRCUTOFF=${REPLOT_SNRCUTOFF:-0}
 REPLOT_WIDTHCUTOFF=${REPLOT_WIDTHCUTOFF:-0}
 
@@ -204,9 +204,10 @@ for MODE in "${MODES[@]}"; do
       --candfile "$cands_file" \
       -c \
       --cont \
+      --zdot \
       --dmcutoff "$REPLOT_DM_CUTOFF" \
       --ddmcutoff "$REPLOT_DDM_CUTOFF" \
-      --snrcutoff "$REPLOT_SNRCUTOFF" \
+      --snrcutoff 0 \
       --widthcutoff "$REPLOT_WIDTHCUTOFF" \
       -t "$(nproc)"
     AFTER=$(wc -l < "$cands_file")
