@@ -15,7 +15,7 @@ VENV_PYTHON="${VENV_PYTHON:-/home/joel/Documents/GitHub/CrabSP/.venv/bin/python}
 MODE="${1:-}"
 
 if [[ "$MODE" == "all" ]]; then
-  MODES=(0.5us 1us 5us 10us)
+  MODES=(0.25us 0.5us 1us 5us)
 elif [[ -n "$MODE" ]]; then
   MODES=("$MODE")
 else

@@ -66,8 +66,16 @@ def fix_dspsr_receiver(ar_path, rcvr_hand=-1, rcvr_sa=0,
     cmd = [psredit_bin, '-c',
            f'rcvr:hand={rcvr_hand},rcvr:sa={rcvr_sa},be:dcc={be_dcc}',
            '-m', str(ar_path)]
+
+    cmd2 = f"{psredit_bin} {ar_path} | grep -e 'rcvr:hand' -e 'rcvr:sa' -e 'be:dcc'"
+    print(f"  psredit pre-patch check: {cmd2}")
+    r2 = subprocess.run(cmd2, capture_output=True, text=True, shell=True)
+    print(r2.stdout)
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=30.0)
+        print(f"  psredit post-patch check: {cmd2}")
+        r2 = subprocess.run(cmd2, capture_output=True, text=True, shell=True)
+        print(r2.stdout)
     except Exception as e:
         print(f"  WARNING: psredit receiver patch failed: {e}")
         return False

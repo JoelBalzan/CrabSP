@@ -40,13 +40,13 @@ FIL_JOBS=${FIL_JOBS:-1}
 
 # The three Crab observations (directories holding the raw *.dada fragments)
 OBS=(
-  "/mnt/exhdd/crab_pks/pks_crab_06-07-26/2026-07-05-23-59-24/J0534+2200/3968"
-  "/mnt/exhdd/crab_pks/pks_crab_20-07-26/2026-07-19-23-14-19/J0534+2200/3968"
+  #"/mnt/exhdd/crab_pks/pks_crab_06-07-26/2026-07-05-23-59-24/J0534+2200/3968"
+  #"/mnt/exhdd/crab_pks/pks_crab_20-07-26/2026-07-19-23-14-19/J0534+2200/3968"
   "/mnt/exhdd/crab_pks/pks_crab_02-08-26/2026-08-02-23-09-56/J0534+2200/3968"
 )
 
 make_search_fil() {
-  "$DIGIFIL" -F 8 -d 1 -b 8 -I 0 -o "$1.fil" "$1"
+  "$DIGIFIL" -F 16 -d 1 -b 8 -I 0 -o "$1.fil" "$1"
 }
 export -f make_search_fil
 

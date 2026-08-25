@@ -336,15 +336,15 @@ def _process_dspsr(c, event, i_event, n_events, frag, offset_s,
     stokes, trimmed_tstart_mjd = trim_folded_to_window(
         stokes, meta['epoch_mjd'] or seek_mjd, tsamp_s, window_s)
 
-    labels = ["I", "Q", "U", "V"]
-    print("\nTrimmed Stokes block")
-    for i, label in enumerate(labels):
-        arr = stokes[i]
-        print(f"{label}")
-        print(f"   mean = {arr.mean():.6f}")
-        print(f"   std  = {arr.std():.6f}")
-        print(f"   min  = {arr.min():.6f}")
-        print(f"   max  = {arr.max():.6f}")
+    #labels = ["I", "Q", "U", "V"]
+    #print("\nTrimmed Stokes block")
+    #for i, label in enumerate(labels):
+    #    arr = stokes[i]
+    #    print(f"{label}")
+    #    print(f"   mean = {arr.mean():.6f}")
+    #    print(f"   std  = {arr.std():.6f}")
+    #    print(f"   min  = {arr.min():.6f}")
+    #    print(f"   max  = {arr.max():.6f}")
     profile = stokes[0].mean(axis=0)
     peak = int(np.argmax(profile))
     print(f"Trimmed start MJD  : {trimmed_tstart_mjd:.12f}")
