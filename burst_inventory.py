@@ -69,7 +69,10 @@ def best_per_event(events):
 
 
 def load_res(cands_dir, res_name, gap_s, min_snr):
-    """Load and reduce one resolution subdir to best-per-event list."""
+    """Load and reduce one resolution subdir to best-per-event list.
+
+    Returns (best, n_raw, n_raw_before_snr) for stats. best is tagged with res.
+    """
     p = Path(cands_dir) / res_name
     files = sorted(p.rglob("*.cands"))
     # avoid double-counting .cands.orig / .tmp? .orig ends with .orig, not .cands, so rglob *.cands excludes it;
@@ -85,14 +88,17 @@ def load_res(cands_dir, res_name, gap_s, min_snr):
     raw = []
     for f in files:
         raw.extend(parse_cands(f))
+    n_raw = len(raw)
     if not raw:
-        return []
+        return [], n_raw
     ev = cluster(raw, gap_s)
-    best = [c for c in best_per_event(ev) if c['snr'] >= min_snr]
+    best_all = best_per_event(ev)
+    n_clustered = len(best_all)
+    best = [c for c in best_all if c['snr'] >= min_snr]
     # tag with res
     for c in best:
         c['res'] = res_name
-    return best
+    return best, n_raw
 
 
 def main():
@@ -146,22 +152,25 @@ def main():
 
     # load each res
     per_res = {}
+    per_res_nraw = {}
     all_best = []
     for res in res_names:
-        best = load_res(cands_dir, res, gap_s, args.min_snr)
+        best, n_raw = load_res(cands_dir, res, gap_s, args.min_snr)
         per_res[res] = best
+        per_res_nraw[res] = n_raw
         all_best.extend(best)
-        print(f"  {res:>8s}: {len(best):4d} events (best per {args.gap} ms cluster)")
 
     if not all_best:
         print("\nno candidates after filtering")
+        # still show raw counts
+        for res in res_names:
+            print(f"  {res:>8s}: {0:4d} events (0 raw cands)")
         return
 
     # global clustering to define N unique bursts
     all_best.sort(key=lambda c: c['mjd'])
     # reuse cluster logic but need to keep res tag; cluster expects list of cands
     global_events = cluster(all_best, match_gap_s)
-    print(f"\nglobal unique bursts: {len(global_events)} (clustered with {args.match_gap or args.gap} ms)")
 
     # build table rows
     rows = []
@@ -180,6 +189,22 @@ def main():
 
     # sort rows by rep MJD
     rows.sort(key=lambda r: r[0]['mjd'])
+
+    # --- start summary: per-res counts + exclusive ---
+    print(f"global unique bursts: {len(global_events)} (clustered with {args.match_gap or args.gap} ms)")
+    print()
+    # exclusive = bursts seen in exactly that one res
+    exclusive = {res: sum(1 for _, _, found, _, _ in rows if found == [res]) for res in res_names}
+    print("Per-res inventory (at start):")
+    print(f"  {'res':>8s}  {'raw':>6s}  {'events':>6s}  {'exclusive':>9s}  {'shared':>6s}")
+    print("  " + "-"*48)
+    for res in res_names:
+        n_raw = per_res_nraw[res]
+        n_ev = len(per_res[res])
+        n_exc = exclusive[res]
+        n_shared = n_ev - n_exc
+        print(f"  {res:>8s}  {n_raw:6d}  {n_ev:6d}  {n_exc:9d}  {n_shared:6d}")
+    print()
 
     # print table
     header = f"{'#':>4s}  {'MJD':>20s}  {'N':>2s}  {'DM':>6s}  {'S/N':>6s}  {'W(ms)':>7s}  {'Found':<30s}  {'Missing'}"
