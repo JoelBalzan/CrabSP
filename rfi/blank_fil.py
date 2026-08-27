@@ -29,7 +29,10 @@ import numpy as np
 
 from sigpyproc.readers import FilReader
 
-from manual_select import select_peaks_manual
+try:
+    from manual_select import select_peaks_manual
+except ImportError:
+    from rfi.manual_select import select_peaks_manual
 
 
 def parse_ranges(strs):

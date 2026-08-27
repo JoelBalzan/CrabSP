@@ -122,7 +122,7 @@ for dir in "${OBS[@]}"; do
 
   if (( DO_EXTRACT )); then
     echo "== [3/3] candidate extraction =="
-    "$VENV_PYTHON" "$SCRIPT_DIR/extract_cands.py" \
+    "$VENV_PYTHON" "$SCRIPT_DIR/../extract_cands.py" \
       --cand-dir cands \
       --workdir "$PWD" \
       --outdir cutouts \
