@@ -56,13 +56,13 @@ fig, (ax_prof, ax_ds) = plt.subplots(
     gridspec_kw={"height_ratios": [1, 4]}
 )
 
-# Time axis in original samples
-time_axis = start + np.arange(arr.shape[0]) * tscrunch
+# Time axis in seconds
+tsamp = fil.header.tsamp
+time_axis = (start + np.arange(arr.shape[0]) * tscrunch) * tsamp
 
 # Pulse profile
 ax_prof.plot(time_axis, profile, lw=0.8, c='k')
 ax_prof.set_ylabel("Mean Power")
-ax_prof.set_xticks([])
 
 # Dynamic spectrum
 extent = [
@@ -83,7 +83,7 @@ im = ax_ds.imshow(
     vmax=vmax,
 )
 
-ax_ds.set_xlabel("Sample")
+ax_ds.set_xlabel("Time (s)")
 ax_ds.set_ylabel("Frequency (MHz)")
 
 plt.tight_layout()

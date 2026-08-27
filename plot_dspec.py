@@ -33,6 +33,8 @@ def main():
     ap.add_argument("--tmax", type=float, default=None, help="zoom end (s)")
     ap.add_argument("--smin", type=int, default=None, help="zoom start (sample)")
     ap.add_argument("--smax", type=int, default=None, help="zoom end (sample)")
+    ap.add_argument("--full", action="store_true",
+                     help="plot the full file instead of auto-zooming")
     ap.add_argument("--pad", type=float, default=0.05,
                      help="seconds of padding around auto-detected peak")
     ap.add_argument("--sat-value", type=float, default=None,
@@ -59,28 +61,37 @@ def main():
     tim = arr.sum(axis=0)
 
     # Work out the zoom window
-    if args.smin is not None and args.smax is not None:
-        s0, s1 = args.smin, args.smax
-    elif args.tmin is not None and args.tmax is not None:
-        s0 = int(args.tmin / tsamp)
-        s1 = int(args.tmax / tsamp)
+    if args.full:
+        # Downsample to keep under ~10k pixels wide
+        max_pix = 10000
+        skip = max(1, nsamp // max_pix)
+        print(f"--full: downsampling by {skip}x ({nsamp} -> {(nsamp + skip - 1) // skip} pixels)")
+        sub = arr[:, ::skip]
+        sub_tim = tim[::skip]
+        t_axis = np.arange(sub.shape[1]) * tsamp * skip
     else:
-        # auto: zoom around the brightest sample in the profile
-        peak = int(np.argmax(tim))
-        pad_samples = int(args.pad / tsamp)
-        s0 = max(0, peak - pad_samples)
-        s1 = min(nsamp, peak + pad_samples)
-        print(f"Auto-zoom around peak sample {peak} "
-              f"(t={peak*tsamp:.4f} s) +/- {args.pad} s")
+        if args.smin is not None and args.smax is not None:
+            s0, s1 = args.smin, args.smax
+        elif args.tmin is not None and args.tmax is not None:
+            s0 = int(args.tmin / tsamp)
+            s1 = int(args.tmax / tsamp)
+        else:
+            # auto: zoom around the brightest sample in the profile
+            peak = int(np.argmax(tim))
+            pad_samples = int(args.pad / tsamp)
+            s0 = max(0, peak - pad_samples)
+            s1 = min(nsamp, peak + pad_samples)
+            print(f"Auto-zoom around peak sample {peak} "
+                  f"(t={peak*tsamp:.4f} s) +/- {args.pad} s")
 
-    s0 = max(0, s0)
-    s1 = min(nsamp, s1)
-    if s1 <= s0:
-        raise ValueError(f"Empty zoom window: samples {s0} to {s1}")
+        s0 = max(0, s0)
+        s1 = min(nsamp, s1)
+        if s1 <= s0:
+            raise ValueError(f"Empty zoom window: samples {s0} to {s1}")
 
-    sub = arr[:, s0:s1]
-    sub_tim = tim[s0:s1]
-    t_axis = (np.arange(s0, s1) * tsamp)
+        sub = arr[:, s0:s1]
+        sub_tim = tim[s0:s1]
+        t_axis = np.arange(s0, s1) * tsamp
 
     fig, (ax_prof, ax_wf) = plt.subplots(
         2, 1, figsize=(10, 8), sharex=True,
@@ -90,8 +101,8 @@ def main():
     # --- profile panel ---
     ax_prof.plot(t_axis, sub_tim, lw=0.8, color="k")
     ax_prof.set_ylabel("Summed power")
-    ax_prof.set_title(f"{args.filfile}\nzoom: {s0}-{s1} samples "
-                       f"({t_axis[0]:.4f}-{t_axis[-1]:.4f} s)")
+    ax_prof.set_title(f"{args.filfile}"
+                       f"\n({t_axis[0]:.4f}-{t_axis[-1]:.4f} s)")
     ax_prof.grid(alpha=0.3)
 
     # --- dynamic spectrum panel ---

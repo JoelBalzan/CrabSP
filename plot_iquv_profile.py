@@ -124,17 +124,191 @@ def plot_pa_segments(ax, t, pa, mask, **kwargs):
         if run.size >= 2:
             ax.plot(t[run], pa[run], **kwargs)
 
+
+# ------------------------------------------------------------------
+# On / off-pulse mask helpers (boxcar-based)
+# ------------------------------------------------------------------
+def boxcar_width(profile, frac=0.95):
+    prof = np.nan_to_num(np.squeeze(profile))
+    n = len(prof)
+    target_flux = frac * np.sum(prof)
+    cumsum = np.cumsum(prof)
+    min_width = n
+    best_start, best_end = 0, n - 1
+    for start in range(n):
+        start_flux = cumsum[start - 1] if start > 0 else 0
+        target_end_flux = start_flux + target_flux
+        end_indices = np.where(cumsum >= target_end_flux)[0]
+        if len(end_indices) > 0:
+            end = end_indices[0]
+            width = end - start + 1
+            if width < min_width:
+                min_width = width
+                best_start, best_end = start, end
+    return best_start, best_end
+
+
+def make_onpulse_mask(n_time, left, right):
+    on_mask = np.zeros(int(n_time), dtype=bool)
+    l = max(0, int(left))
+    r = min(int(n_time) - 1, int(right))
+    if r >= l:
+        on_mask[l:r + 1] = True
+    return on_mask
+
+
+def make_offpulse_mask(n_time, left, right, buffer_bins=0):
+    n = int(n_time)
+    l_on = max(0, int(left))
+    r_on = min(n - 1, int(right))
+    buf = max(0, int(buffer_bins))
+    l_excl = max(0, l_on - buf)
+    r_excl = min(n - 1, r_on + buf)
+    off_mask = np.ones(n, dtype=bool)
+    if r_excl >= l_excl:
+        off_mask[l_excl:r_excl + 1] = False
+    return off_mask
+
+
+def on_off_pulse_masks_from_profile(profile, intrinsic_width_bins,
+                                    frac=0.95, buffer_frac=None):
+    prof = np.asarray(profile, dtype=float)
+    left, right = boxcar_width(prof, frac=frac)
+    buffer_bins = (int(float(buffer_frac) * intrinsic_width_bins)
+                   if buffer_frac is not None else 0)
+    on_mask = make_onpulse_mask(prof.size, left, right)
+    off_mask = np.zeros(prof.size, dtype=bool)
+    end_off = max(0, left - buffer_bins - 1)
+    if end_off >= 0:
+        off_mask[0:end_off + 1] = True
+    return on_mask, off_mask, (left, right)
+
+def _running_median(x, win):
+    win = max(int(win), 1)
+    if win % 2 == 0:
+        win += 1
+    if win <= 1 or x.size < win:
+        return x.copy()
+    half = win // 2
+    xpad = np.pad(x, (half, half), mode="edge")
+    out = np.empty_like(x, dtype=float)
+    for i in range(x.size):
+        out[i] = np.median(xpad[i:i + win])
+    return out
+
+
+def _self_noise_bins(I_on, sigma_N2, intrinsic_width_bins, trend_frac=0.15,
+                      n_bins_max=30, min_bin_count=10):
+    """Detrend I_on (on-pulse, off-pulse-subtracted) and bin residual
+    variance by local trend value. Works at any time resolution -- caller
+    passes intrinsic_width_bins already converted to that resolution's
+    sample units.
+
+    Returns dict with bin_means, bin_vars, bin_counts, ratio (possibly
+    empty arrays if there isn't enough data), plus sigma_N2 passed through.
+    """
+    out = dict(bin_means=np.array([]), bin_vars=np.array([]),
+               bin_counts=np.array([]), ratio=np.array([]), sigma_N2=sigma_N2)
+
+    if I_on.size <= 50 or sigma_N2 <= 0:
+        return out
+
+    trend_win = max(int(round(intrinsic_width_bins * trend_frac)), 3)
+    trend = _running_median(I_on, trend_win)
+    resid = I_on - trend
+
+    lo_p, hi_p = np.percentile(trend, [1, 99])
+    n_bins = min(n_bins_max, max(5, I_on.size // 20))
+    edges = np.linspace(lo_p, hi_p, n_bins + 1)
+
+    bin_means, bin_vars, bin_counts = [], [], []
+    for j in range(n_bins):
+        in_bin = (trend >= edges[j]) & (trend < edges[j + 1])
+        cnt = int(in_bin.sum())
+        if cnt < min_bin_count:
+            continue
+        bin_means.append(float(np.mean(trend[in_bin])))
+        bin_vars.append(float(np.var(resid[in_bin])))
+        bin_counts.append(cnt)
+
+    bin_means = np.array(bin_means)
+    bin_vars = np.array(bin_vars)
+    bin_counts = np.array(bin_counts)
+    ratio = bin_vars / sigma_N2 if bin_means.size else np.array([])
+
+    out.update(bin_means=bin_means, bin_vars=bin_vars,
+               bin_counts=bin_counts, ratio=ratio)
+    return out
+
+
+def _self_noise_slope_fit(I_on, sigma_N2, intrinsic_width_bins, n_boot=200,
+                           rng=None, **kw):
+    """Weighted linear fit of variance-ratio vs local-trend mean, with a
+    bootstrap uncertainty on the slope. This is the primary self-noise
+    sweep metric -- it uses every bin (weighted by count) instead of a
+    single brightest-bin ratio, which is too noisy on its own to decide
+    whether self-noise has actually gone away at a given time resolution.
+
+    Returns dict with slope, slope_err, n_bins. slope/slope_err are nan
+    if there isn't enough data to fit (fewer than 2 populated bins).
+    """
+    rng = rng or np.random.default_rng()
+    sn = _self_noise_bins(I_on, sigma_N2, intrinsic_width_bins, **kw)
+    bm, bv, cnt = sn["bin_means"], sn["bin_vars"], sn["bin_counts"]
+
+    out = dict(slope=np.nan, slope_err=np.nan, n_bins=int(bm.size),
+                bins=sn)
+    if bm.size < 2 or sigma_N2 <= 0:
+        return out
+
+    ratio = bv / sigma_N2
+
+    def _weighted_slope(y):
+        w = cnt.astype(float)
+        A = np.vstack([np.ones_like(bm), bm]).T
+        W = np.diag(w)
+        try:
+            coef, *_ = np.linalg.lstsq(W @ A, W @ y, rcond=None)
+            return float(coef[1])
+        except np.linalg.LinAlgError:
+            return np.nan
+
+    slope = _weighted_slope(ratio)
+
+    # Bootstrap: resample on-pulse residuals within each bin (using the
+    # trend/resid arrays recomputed inside _self_noise_bins is not
+    # directly exposed, so instead we bootstrap at the bin level by
+    # resampling bin variances via a chi-square approximation: for a
+    # bin with cnt samples, Var estimate has relative std ~ sqrt(2/cnt).
+    # This is a standard variance-of-variance approximation and avoids
+    # needing to re-run the full detrend on every bootstrap draw.
+    boot_slopes = np.empty(n_boot)
+    rel_std = np.sqrt(2.0 / np.maximum(cnt.astype(float), 2))
+    for b in range(n_boot):
+        ratio_b = ratio * (1.0 + rel_std * rng.standard_normal(ratio.size))
+        boot_slopes[b] = _weighted_slope(ratio_b)
+    slope_err = float(np.nanstd(boot_slopes))
+
+    out.update(slope=slope, slope_err=slope_err)
+    return out
+
+
 def generate_profile_plot(npz_file, out=None, pa_thresh=PA_SIGMA_THRESH,
                            zoom_half_width=ZOOM_HALF_WIDTH_NATIVE,
                            zoom_ncols=ZOOM_NCOLS,
                            dspec_interp=DSPEC_INTERPOLATION,
                            scrunch_factors=None, title_suffix='', dpi=150,
-                           unwrap_pa=False):
+                           unwrap_pa=False, self_noise_sig_thresh=2.0):
     """Build the full diagnostic figure for one candidate .npz and save it.
 
     npz_file: path to a candidate _iquv.npz written by extract_cands.py
     out: output PNG path (default: npz_file with _iquv.npz -> _profile.png)
     title_suffix: appended to the plot title (e.g. calibration status)
+    self_noise_ratio_thresh: variance-ratio (sigma^2/sigma_N^2) threshold
+        below which a tscrunch factor is considered radiometer-limited
+        (i.e. "safe" from self-noise bias). Used only to annotate/report
+        the coarsest safe factor among scrunch_factors; does not affect
+        what gets plotted.
 
     Returns the output path.
     """
@@ -215,7 +389,7 @@ def generate_profile_plot(npz_file, out=None, pa_thresh=PA_SIGMA_THRESH,
     sigma_I = off_pulse_rms(I_prof, on_lo, on_hi)
 
     L_prof = debias_L(Q_prof, U_prof, sigma_QU)
-    
+
     L_meas = np.sqrt(Q_prof**2 + U_prof**2)
     L_sig = np.divide(
         L_meas,
@@ -229,10 +403,10 @@ def generate_profile_plot(npz_file, out=None, pa_thresh=PA_SIGMA_THRESH,
         out=np.zeros_like(I_prof),
         where=sigma_I > 0,
     )
-    
+
     # Only use statistically significant samples for PA.
     pa_mask = (L_sig > pa_thresh) & (I_sig > 3.0)
-    
+
     # Calculate / unwrap PA only after masking.
     PA_prof = calculate_pa(Q_prof, U_prof, pa_mask, unwrap=unwrap_pa)
 
@@ -262,31 +436,77 @@ def generate_profile_plot(npz_file, out=None, pa_thresh=PA_SIGMA_THRESH,
         figure=fig, top=0.95, bottom=0.06, left=0.055, right=0.98,
     )
 
-    # ---- Left column: main overview plot (kept compact, not over-stretched) ----
+    # ---- Left column: main overview plot ----
     gs_left = gs_outer[0, 0].subgridspec(
-        3, 1, height_ratios=[1.0, 1.3, 1.6], hspace=0.10
+        2, 1, height_ratios=[1.0, 3.0], hspace=0.25
     )
-    ax_pa = fig.add_subplot(gs_left[0, 0])
-    ax_prof = fig.add_subplot(gs_left[1, 0], sharex=ax_pa)
-    ax_dspec = fig.add_subplot(gs_left[2, 0], sharex=ax_pa)
+    gs_sn = gs_left[0, 0].subgridspec(1, 2, wspace=0.35)
+    ax_sn_var = fig.add_subplot(gs_sn[0, 0])
+    ax_sn_ratio = fig.add_subplot(gs_sn[0, 1])
 
-    # ---- PA panel ----
-    ax_pa.errorbar(time_native[pa_mask], PA_prof[pa_mask],
-                   yerr=sigma_PA_deg[pa_mask], fmt='none',
-                   ecolor='gray', elinewidth=0.5, capsize=2, zorder=1)
-    ax_pa.scatter(time_native[pa_mask], PA_prof[pa_mask], s=4, c="k", zorder=2)
-    ax_pa.set_ylabel("PA (deg)")
-    if not unwrap_pa:
-        ax_pa.set_ylim(-90, 90)
-    ax_pa.tick_params(labelbottom=False)
+    gs_prof_dspec = gs_left[1, 0].subgridspec(
+        2, 1, height_ratios=[1.3, 1.6], hspace=0.0
+    )
+    ax_prof = fig.add_subplot(gs_prof_dspec[0, 0])
+    ax_dspec = fig.add_subplot(gs_prof_dspec[1, 0], sharex=ax_prof)
+
+    # ---- Self-noise panel (native resolution) ----
+    intrinsic_width_bins = max(int(float(d["cand_width_ms"]) * 1e-3 / tsamp_s), 1) if width_ms > 0 else max(nsamp // 40, 1)
+    on_mask_sn, off_mask_sn, (bl, br) = on_off_pulse_masks_from_profile(
+        I_prof, intrinsic_width_bins, frac=0.95, buffer_frac=2.0)
+
+    I_on = I_prof[on_mask_sn] - np.median(I_prof[off_mask_sn])
+    sigma_N2 = float(np.var(I_prof[off_mask_sn]))
+    
+    sn_native = _self_noise_bins(I_on, sigma_N2, intrinsic_width_bins)
+    sn_native_fit = _self_noise_slope_fit(I_on, sigma_N2, intrinsic_width_bins)
+    bin_means, bin_vars, bin_counts, ratio = (
+        sn_native["bin_means"], sn_native["bin_vars"],
+        sn_native["bin_counts"], sn_native["ratio"])
+
+    if bin_means.size > 0:
+        sz = np.clip(bin_counts / bin_counts.max() * 60, 10, 60)
+        ax_sn_var.scatter(bin_means, bin_vars, s=sz, c="steelblue",
+                          edgecolors="k", linewidths=0.4, alpha=0.85, zorder=3)
+        ax_sn_var.axhline(sigma_N2, color="0.5", ls="--", lw=1,
+                          label=rf"$\sigma_N^2$={sigma_N2:.1e}")
+        ax_sn_var.set_xlabel("Local trend (off-pulse subtracted)", fontsize=7)
+        ax_sn_var.set_ylabel(r"Var(residual)", fontsize=7)
+        ax_sn_var.set_title("Self-noise (detrended)", fontsize=8)
+        ax_sn_var.legend(fontsize=6, frameon=False)
+
+        ax_sn_ratio.scatter(bin_means, ratio, s=sz, c="darkorange",
+                            edgecolors="k", linewidths=0.4, alpha=0.85, zorder=3)
+        ax_sn_ratio.axhline(1.0, color="0.5", ls="--", lw=1, label="radiometer")
+        ax_sn_ratio.set_xlabel("Local trend (off-pulse subtracted)", fontsize=7)
+        ax_sn_ratio.set_ylabel(r"$\sigma^2/\sigma_N^2$", fontsize=7)
+        ax_sn_ratio.set_title("Variance ratio", fontsize=8)
+        ax_sn_ratio.legend(fontsize=6, frameon=False)
+    elif I_on.size > 50 and sigma_N2 > 0:
+        ax_sn_var.text(0.5, 0.5, "too few populated bins", transform=ax_sn_var.transAxes,
+                        ha="center", va="center", fontsize=8, color="gray")
+        ax_sn_ratio.text(0.5, 0.5, "too few populated bins", transform=ax_sn_ratio.transAxes,
+                          ha="center", va="center", fontsize=8, color="gray")
+    else:
+        ax_sn_var.text(0.5, 0.5, "insufficient on-pulse", transform=ax_sn_var.transAxes,
+                        ha="center", va="center", fontsize=8, color="gray")
+        ax_sn_ratio.text(0.5, 0.5, "insufficient on-pulse", transform=ax_sn_ratio.transAxes,
+                          ha="center", va="center", fontsize=8, color="gray")
+
+    for ax_sn in (ax_sn_var, ax_sn_ratio):
+        ax_sn.tick_params(labelsize=6)
+
     title = f"Cand {cand_id}  MJD {cand_mjd:.6f}  DM {cand_dm:.2f}  SNR {cand_snr:.1f}  {tres_label}"
     if calib_applied:
         title += "  [cal]"
     if title_suffix:
         title += f"  {title_suffix}"
-    ax_pa.set_title(title)
+    ax_sn_var.set_title(f"Self-noise  |  Cand {cand_id}", fontsize=8)
 
     # ---- I / L profile panel ----
+    on_t_lo = time_native[on_lo]
+    on_t_hi = time_native[min(on_hi, nsamp - 1)]
+    ax_prof.axvspan(on_t_lo, on_t_hi, color="royalblue", alpha=0.12, zorder=0)
     ax_prof.plot(time_native, I_prof, color="k", lw=0.8, label="I")
     ax_prof.plot(time_native, L_prof, color="crimson", lw=0.8, label="L (debiased)")
     if V_prof is not None:
@@ -294,6 +514,7 @@ def generate_profile_plot(npz_file, out=None, pa_thresh=PA_SIGMA_THRESH,
     ax_prof.axhline(0, color="gray", lw=0.5)
     ax_prof.set_ylabel("Flux (a.u.)")
     ax_prof.legend(loc="upper right", fontsize=8, frameon=False)
+    ax_prof.set_title(title, fontsize=9)
     ax_prof.tick_params(labelbottom=False)
 
     # ---- Dynamic spectrum panel (matplotlib-interpolated for display only) ----
@@ -313,8 +534,8 @@ def generate_profile_plot(npz_file, out=None, pa_thresh=PA_SIGMA_THRESH,
     ax_dspec.set_xlabel("Time (ms)")
 
     peak_t_ms = time_native[peak_idx_native]
-    for ax in (ax_pa, ax_prof, ax_dspec):
-        ax.axvline(peak_t_ms, color="orange", lw=0.6, ls="--", alpha=0.7)
+    ax_prof.axvline(peak_t_ms, color="orange", lw=0.6, ls="--", alpha=0.7)
+    ax_dspec.axvline(peak_t_ms, color="orange", lw=0.6, ls="--", alpha=0.7)
 
     # ==================================================================
     # RIGHT SIDE: grid of landscape zoom panels (tscrunch series), laid
@@ -322,10 +543,19 @@ def generate_profile_plot(npz_file, out=None, pa_thresh=PA_SIGMA_THRESH,
     # sub-row and an I/L sub-row, sharing the x-axis. The peak index is
     # transformed by integer division only -- never re-found after
     # scrunching.
+    #
+    # Self-noise sweep: at each factor we also run the same detrend+bin
+    # diagnostic on that factor's on-pulse I_scr, so we can see directly
+    # (in each panel's title, and in the summary printed after the loop)
+    # at what scrunch factor the variance ratio settles to ~1, i.e. the
+    # coarsest time resolution at which the polarimetry error bars are
+    # no longer significantly biased by self-noise.
     # ==================================================================
     gs_zoom_grid = gs_outer[0, 1].subgridspec(
         nrows, ncols, hspace=0.55, wspace=0.22
     )
+
+    self_noise_sweep = []  # (factor, tsamp_scr, ratio_top)
 
     for i, factor in enumerate(scrunch_factors):
         row, col = divmod(i, ncols)
@@ -400,13 +630,28 @@ def generate_profile_plot(npz_file, out=None, pa_thresh=PA_SIGMA_THRESH,
         peak_amp_scr = I_scr[peak_idx_scr]
         snr_scr = peak_amp_scr / sigma_I_scr if sigma_I_scr > 0 else np.nan
 
+        # ---- Self-noise check at this scrunch factor ----
+        # Reuse the same on/off masks (transformed to this resolution) so
+        # the on-pulse window tracks the same physical pulse extent across
+        # factors. intrinsic_width_bins is converted into this factor's
+        # sample units (min 1 bin) so the trend-window fraction stays
+        # physically consistent.
+        intrinsic_width_bins_scr = max(intrinsic_width_bins // factor, 1)
+        on_mask_scr, off_mask_scr, _ = on_off_pulse_masks_from_profile(
+            I_scr, intrinsic_width_bins_scr, frac=0.95, buffer_frac=2.0)
+        I_on_scr = I_scr[on_mask_scr] - np.median(I_scr[off_mask_scr])
+        sigma_N2_scr = float(np.var(I_scr[off_mask_scr]))
+        sn_fit_scr = _self_noise_slope_fit(
+            I_on_scr, sigma_N2_scr, intrinsic_width_bins_scr)
+        self_noise_sweep.append((factor, tsamp_scr, sn_fit_scr["slope"],
+                                  sn_fit_scr["slope_err"], sn_fit_scr["n_bins"]))
+
         # PA sub-row
         ax_pa_z.errorbar(t_scr[sl][pa_mask_scr[sl]], PA_scr[sl][pa_mask_scr[sl]],
                          yerr=sigma_PA_scr[sl][pa_mask_scr[sl]], fmt='none',
                          ecolor='gray', elinewidth=0.5, capsize=2, zorder=1)
         ax_pa_z.scatter(t_scr[sl][pa_mask_scr[sl]], PA_scr[sl][pa_mask_scr[sl]],
                          s=8, c="k", zorder=2)
-        #ax_pa_z.plot(t_scr[sl][pa_mask_scr[sl]], PA_scr[sl][pa_mask_scr[sl]], color="k", lw=0.8, alpha=0.5)
         plot_pa_segments(
             ax_pa_z,
             t_scr[sl],
@@ -421,8 +666,18 @@ def generate_profile_plot(npz_file, out=None, pa_thresh=PA_SIGMA_THRESH,
             ax_pa_z.set_ylim(-90, 90)
         ax_pa_z.tick_params(labelbottom=False, labelsize=7)
         ax_pa_z.set_ylabel("PA", fontsize=8)
+
+        slope_scr, slope_err_scr = sn_fit_scr["slope"], sn_fit_scr["slope_err"]
+        if np.isfinite(slope_scr) and np.isfinite(slope_err_scr) and slope_err_scr > 0:
+            sig_scr = abs(slope_scr) / slope_err_scr
+            slope_str = f"{slope_scr:+.2e}\u00b1{slope_err_scr:.1e} ({sig_scr:.1f}\u03c3)"
+            flag = "" if sig_scr < 2.0 else "  \u26a0"
+        else:
+            slope_str = "n/a"
+            flag = ""
         ax_pa_z.set_title(
-            f"{factor}x  ({tsamp_scr*1e6:.2f} \u00b5s)   S/N={snr_scr:.1f}",
+            f"{factor}x  ({tsamp_scr*1e6:.2f} \u00b5s)   S/N={snr_scr:.1f}"
+            f"   slope={slope_str}{flag}",
             fontsize=9,
         )
 
@@ -441,6 +696,55 @@ def generate_profile_plot(npz_file, out=None, pa_thresh=PA_SIGMA_THRESH,
         ax_prof_z.tick_params(labelsize=7)
         if i == 0:
             ax_prof_z.legend(loc="upper right", fontsize=7, frameon=False)
+
+    # ------------------------------------------------------------------
+    # Self-noise sweep summary: use the weighted-slope fit (not a
+    # single-bin ratio) as the criterion, since ratio_top is dominated by
+    # per-bin sampling noise and bounces around non-monotonically with
+    # scrunch factor even when a real trend is present. "Safe" here means
+    # the slope is statistically consistent with zero (|slope| < 2*slope_err),
+    # i.e. no resolvable rise of variance with intensity -- not merely that
+    # some single bin happened to land near sigma_N^2.
+    # ------------------------------------------------------------------
+    full_sweep = [(1, tsamp_s, sn_native_fit["slope"], sn_native_fit["slope_err"],
+                   sn_native_fit["n_bins"])] + self_noise_sweep
+
+    def _is_safe(slope, slope_err, n_bins, sig_thresh=self_noise_sig_thresh, min_bins=3):
+        if not (np.isfinite(slope) and np.isfinite(slope_err)):
+            return False
+        if n_bins < min_bins:
+            return False
+        if slope_err <= 0:
+            return False
+        return abs(slope) / slope_err < sig_thresh
+
+    safe = [(f, ts, sl, se) for (f, ts, sl, se, nb) in full_sweep
+            if _is_safe(sl, se, nb)]
+
+    if safe:
+        # report the FINEST (smallest tsamp) safe factor -- the best
+        # available time resolution at which self-noise is not resolvable
+        best_factor, best_tsamp, best_slope, best_err = min(safe, key=lambda x: x[1])
+        sweep_msg = (f"self-noise consistent with zero at >= {best_factor}x "
+                     f"({best_tsamp*1e6:.2f} \u00b5s, "
+                     f"slope={best_slope:+.2e}\u00b1{best_err:.1e})")
+    elif full_sweep:
+        sweep_msg = "self-noise slope not consistent with zero at any tested factor"
+    else:
+        sweep_msg = ""
+
+    if sweep_msg:
+        fig.text(0.005, 0.005, sweep_msg, fontsize=7, color="firebrick",
+                  ha="left", va="bottom")
+        print(f"[{cand_id}] {sweep_msg}")
+        for f, ts, sl, se, nb in full_sweep:
+            if np.isfinite(sl) and np.isfinite(se) and se > 0:
+                sig = abs(sl) / se
+                print(f"    {f:>4d}x  {ts*1e6:8.2f} us  n_bins={nb:2d}  "
+                      f"slope={sl:+.3e}\u00b1{se:.2e}  ({sig:.1f}\u03c3)"
+                      f"{'  SAFE' if sig < 2.0 else ''}")
+            else:
+                print(f"    {f:>4d}x  {ts*1e6:8.2f} us  n_bins={nb:2d}  slope=n/a")
 
     out_path = out or str(npz_file).rsplit(".", 1)[0] + "_profile.png"
     fig.savefig(out_path, dpi=dpi)
