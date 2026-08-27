@@ -437,7 +437,7 @@ def _calibrate_archive(ar_path, calib_file, cal_db, args, fold_bw_mhz):
 def _process_digifil(c, event, i_event, n_events, frag, offset_s,
                      frags, args, base_outdir, outdir):
     """Handle the digifil extraction route for a single candidate event."""
-    from plot_iquv_profile import generate_profile_plot
+    from plotting.plot_iquv_profile import generate_profile_plot
 
     window_s = args.window_s
     dada_paths, digifil_seek_s, digifil_dur_s, first_frag, plan_note = plan_extraction(
@@ -581,7 +581,7 @@ def _process_digifil(c, event, i_event, n_events, frag, offset_s,
 
 def _generate_plot(npz_path, outname, outdir, calib_file, cal_db, args):
     """Generate polarimetric profile plot."""
-    from plot_iquv_profile import generate_profile_plot
+    from plotting.plot_iquv_profile import generate_profile_plot
 
     png_path = outdir / f"{outname}_iquv_profile.png"
     cal_applied_now = bool(calib_file or cal_db)
