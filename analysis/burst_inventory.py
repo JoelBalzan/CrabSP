@@ -12,6 +12,11 @@ Usage:
     python burst_inventory.py cands --gap 6 --min-snr 10
     python burst_inventory.py cands --gap 6 --match-gap 6 -v
     python burst_inventory.py cands --out bursts.txt
+    python burst_inventory.py cands --out-cands unique.cands  # for extract_cands
+
+    # feed unique bursts (one rep per global event) to the extractor:
+    python burst_inventory.py cands --gap 6 --out-cands /tmp/unique.cands
+    python extract_cands.py --cand-files /tmp/unique.cands --workdir . --outdir cutouts --cluster-gap-ms 0
 
 Output (example):
     #  MJD                 N  DM     S/N  W(ms)  Found                                          Missing
@@ -25,26 +30,28 @@ from collections import defaultdict
 
 
 def parse_cands(path):
-    """Return list of {cand_id,mjd,dm,width_ms,snr,fil} dicts from a .cands file."""
+    """Return list of {beam,cand_id,mjd,dm,width_ms,snr,fil,raw} dicts from a .cands file."""
     cands = []
     with open(path) as f:
         for line in f:
-            line = line.strip()
-            if not line or line.startswith("#"):
+            raw = line.rstrip("\n")
+            line_stripped = line.strip()
+            if not line_stripped or line_stripped.startswith("#"):
                 continue
-            p = line.split()
+            p = line_stripped.split()
             if len(p) < 6:
                 continue
             try:
-                # transientX: col0 ? col1 id col2 mjd col3 dm col4 width_ms col5 snr ... last fil
-                # handle both with/without header; be permissive
+                # transientX: col0 beam col1 id col2 mjd col3 dm col4 width_ms col5 snr ... last fil
                 cands.append({
+                    'beam': p[0],
                     'cand_id': p[1],
                     'mjd': float(p[2]),
                     'dm': float(p[3]),
                     'width_ms': float(p[4]),
                     'snr': float(p[5]),
                     'fil': p[-1],
+                    'raw': raw,
                 })
             except (ValueError, IndexError):
                 continue
@@ -112,6 +119,8 @@ def main():
     ap.add_argument("-v", "--verbose", action="store_true",
                     help="also print per-res S/N/W for each burst")
     ap.add_argument("--out", type=str, default=None, help="write table to file as well")
+    ap.add_argument("--out-cands", type=str, default=None,
+                    help="write a merged deduped .cands file (one rep per global burst) for extract_cands --cand-files")
     args = ap.parse_args()
 
     cands_dir = Path(args.cands_dir)
@@ -224,6 +233,21 @@ def main():
     if args.out:
         Path(args.out).write_text(out_text + "\n")
         print(f"\nwrote {args.out}")
+
+    if args.out_cands:
+        out_cands = Path(args.out_cands)
+        with open(out_cands, "w") as f:
+            for rep, _, _, _, _ in rows:
+                raw = rep.get("raw")
+                if raw is not None:
+                    f.write(raw + "\n")
+                else:
+                    # fallback minimal reconstruction (beam cand_id mjd dm width snr ... fil)
+                    beam = rep.get("beam", "0")
+                    f.write(f"{beam} {rep['cand_id']} {rep['mjd']:.10f} {rep['dm']:.2f} {rep['width_ms']:.4f} {rep['snr']:.2f} 0 0 0 {rep['fil']}\n")
+        print(f"\nwrote merged {len(rows)} unique cands -> {out_cands} (one rep per global burst)")
+        print(f"  use: python extract_cands.py --cand-files {out_cands} --workdir $PWD --outdir cutouts --cluster-gap-ms 0")
+        print(f"       (already deduped with gap {args.match_gap or args.gap} ms; extractor should use --cluster-gap-ms 0)")
 
     # summary: how many bursts were seen in exactly k resolutions
     from collections import Counter
