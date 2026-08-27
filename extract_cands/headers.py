@@ -89,9 +89,12 @@ def crop_dada_file(dada_path, offset_s, dur_s, out_path, hdr_size=4096,
         f.seek(hdr_size + byte_start)
         data = f.read(byte_count)
     if len(data) < byte_count:
-        raise RuntimeError(f"{dada_path}: requested {byte_count} bytes at "
-                           f"offset {byte_start}, only {len(data)} available "
-                           f"-- crop window runs past this file's end")
+        if len(data) == 0:
+            raise RuntimeError(f"{dada_path}: requested {byte_count} bytes at "
+                               f"offset {byte_start}, only 0 available "
+                               f"-- crop window runs past this file's end")
+        if resolution > 1:
+            data = data[:len(data) // resolution * resolution]
 
     header_text = header_bytes.decode('latin-1', errors='replace')
     lines = header_text.split('\n')

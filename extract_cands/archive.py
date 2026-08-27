@@ -212,14 +212,17 @@ def log_archive_info(ar_path, label="archive"):
         print(f"  WARNING: could not log archive info: {e}")
 
 
-def read_ar_stokes(ar_path):
+def read_ar_stokes(ar_path, cand_mjd=None, seek_mjd=None):
     """Read a folded/calibrated psrchive archive into (4, nchan, nbin) IQUV.
 
-    Handles both Coherence-state and Stokes-state archives; always uses
-    subint 0 (the temporally correct one given dspsr's -seek anchor).
+    Handles both Coherence-state and Stokes-state archives. When the archive
+    has multiple subints (dspsr folded past the candidate to EOF), the subint
+    containing the candidate is selected by MJD; otherwise subint 0 is used.
+    cand_mjd is preferred, seek_mjd is the fallback. If neither is given or
+    no interval contains the MJD, the closest subint is chosen.
 
     Returns (stokes, meta) with meta = {state, nchan, nbin, freqs_mhz,
-    fch1_mhz, foff_mhz, epoch_mjd}.
+    fch1_mhz, foff_mhz, epoch_mjd, chosen_subint}.
     """
     try:
         import psrchive
@@ -236,11 +239,60 @@ def read_ar_stokes(ar_path):
     if npol != 4:
         raise RuntimeError(f"{ar_path}: got {npol} pols (state={state}); "
                            f"need the full 4 coherency products")
+    chosen = 0
     if nsub > 1:
-        print(f"    archive has {nsub} integrations (dspsr folded past the "
-              f"candidate to EOF); using subint 0, the temporally correct "
-              f"one given the -seek anchor")
-        d = d[0:1]
+        target_mjd = cand_mjd if cand_mjd is not None else seek_mjd
+        if target_mjd is not None:
+            # Use start_time + duration to find the interval containing the
+            # candidate. dspsr's first subint can be truncated (short dur) and
+            # subints are not necessarily stored in chronological order, so we
+            # must check all.
+            best_idx = None
+            best_dist = None
+            for idx in range(nsub):
+                try:
+                    integ = a.get_Integration(idx)
+                    st = integ.get_start_time()
+                    st_mjd = float(st.intday() + st.fracday())
+                    dur_s = float(integ.get_duration())
+                    end_mjd = st_mjd + dur_s / 86400.0
+                    # Prefer interval containing target
+                    if st_mjd <= target_mjd < end_mjd:
+                        best_idx = idx
+                        break
+                    dist = min(abs(target_mjd - st_mjd), abs(target_mjd - end_mjd))
+                    if best_dist is None or dist < best_dist:
+                        best_dist = dist
+                        best_idx = idx
+                except Exception:
+                    continue
+            if best_idx is not None:
+                chosen = best_idx
+                if chosen != 0:
+                    print(f"    archive has {nsub} integrations; selecting subint {chosen} "
+                          f"(closest to cand MJD {target_mjd:.12f}) instead of subint 0")
+                else:
+                    print(f"    archive has {nsub} integrations; subint 0 is the closest to cand MJD")
+            else:
+                print(f"    archive has {nsub} integrations (dspsr folded past the candidate to EOF); using subint 0")
+                chosen = 0
+        else:
+            print(f"    archive has {nsub} integrations (dspsr folded past the "
+                  f"candidate to EOF); using subint 0, the temporally correct "
+                  f"one given the -seek anchor")
+            chosen = 0
+        d = d[chosen:chosen+1]
+        # For meta, use the chosen integration's epoch
+        try:
+            m = a.get_Integration(chosen).get_epoch()
+            epoch_mjd = float(m.intday() + m.fracday())
+        except Exception:
+            epoch_mjd = None
+        # Fall through to common handling below, but we already have epoch
+        # Save it for later return
+        _chosen_epoch = epoch_mjd
+    else:
+        _chosen_epoch = None
     if 'Stokes' in state:
         stokes = d[0]
     elif 'Coherence' in state:
@@ -253,14 +305,25 @@ def read_ar_stokes(ar_path):
         raise RuntimeError(f"{ar_path}: get_frequencies {freqs.shape} != "
                            f"nchan {nchan} — archive state inconsistent")
     foff_mhz = float(freqs[1] - freqs[0]) if nchan > 1 else 0.0
-    try:
-        m = a.get_epoch()
-        epoch_mjd = float(getattr(m, 'val', m.intday + m.fracday))
-    except Exception:
-        epoch_mjd = None
+    # Prefer the chosen subint's epoch when nsub>1, otherwise archive epoch
+    if nsub > 1 and _chosen_epoch is not None:
+        epoch_mjd = _chosen_epoch
+    else:
+        try:
+            m = a.get_epoch()
+            # psrchive MJD has intday/fracday methods, not val in newer bindings
+            if hasattr(m, 'intday'):
+                epoch_mjd = float(m.intday() + m.fracday())
+            else:
+                epoch_mjd = float(getattr(m, 'val', m.intday + m.fracday))
+        except Exception:
+            epoch_mjd = None
+        if nsub > 1 and _chosen_epoch is not None and epoch_mjd is None:
+            epoch_mjd = _chosen_epoch
     return stokes, {'state': state, 'nchan': nchan, 'nbin': nbin,
                     'freqs_mhz': freqs, 'fch1_mhz': float(freqs[0]),
-                    'foff_mhz': foff_mhz, 'epoch_mjd': epoch_mjd}
+                    'foff_mhz': foff_mhz, 'epoch_mjd': epoch_mjd,
+                    'chosen_subint': chosen if nsub > 1 else 0}
 
 
 def trim_folded_to_window(stokes, epoch_mjd, tsamp_s, window_s):

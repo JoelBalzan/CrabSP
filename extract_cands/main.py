@@ -29,9 +29,9 @@ def main():
                      help='fixed cutout window length, seconds (default 6 ms), '
                           'centred on the burst.')
     ap.add_argument('--min-snr', type=float, default=0.0)
-    ap.add_argument('--cluster-gap-ms', type=float, default=3.0,
+    ap.add_argument('--cluster-gap-ms', type=float, default=0.0,
                      help='merge candidates into one event when consecutive MJDs are '
-                          'less than this far apart (ms). default 3 ms')
+                          'less than this far apart (ms). 0 = no clustering (default)')
     ap.add_argument('--digifil-bin', default='digifil')
     ap.add_argument('--digifil-min-block', '--df-min-block', type=float, default=0.5,
                      help='minimum duration (s) to request from digifil per call.')
@@ -163,7 +163,10 @@ def main():
                 continue
             cands.append(c)
 
-        events = cluster_candidates(cands, args.cluster_gap_ms / 1000.0)
+        if args.cluster_gap_ms > 0:
+            events = cluster_candidates(cands, args.cluster_gap_ms / 1000.0)
+        else:
+            events = [[c] for c in cands]
         n_events = len(events)
         n_cands = len(cands)
         print(f"  {n_cands} candidates -> {n_events} events "
@@ -238,9 +241,22 @@ def _process_dspsr(c, event, i_event, n_events, frag, offset_s,
         fold_dada_paths = dada_paths
         tmp_cropped = None
         if len(dada_paths) == 1:
-            crop_offset_s = max(0.0, (seek_mjd - frag['tstart_mjd']) * 86400.0)
+            # Coherent dedispersion needs history before the fold epoch.
+            # dspsr's overlap-save filter is ~131 ms at 32 Msps (nfft=4194304)
+            # plus ~tens of ms of dispersive sweep at low frequency, so
+            # starting the cropped file exactly at seek_mjd leaves the first
+            # ~100 ms of the fold corrupted / truncated (subint 0 short, burst
+            # appears in the next subint and is missed when we keep subint 0).
+            # Include a pre-roll before seek; clamp to the fragment start.
+            _prepad_s = 0.25  # enough for 131 ms filter + DM sweep anywhere in UWL
+            seek_offset_s = (seek_mjd - frag['tstart_mjd']) * 86400.0
+            desired_start_s = seek_offset_s - _prepad_s
+            if desired_start_s < 0.0:
+                _prepad_s = seek_offset_s  # use whatever history is available
+                desired_start_s = 0.0
+            crop_offset_s = desired_start_s
             crop_dur_s = max(3.0 * (turns * period + 2 * margin_s),
-                             args.fast_min_crop_s)
+                             args.fast_min_crop_s) + _prepad_s
             crop_dur_s = min(crop_dur_s,
                              frag['obslen_s'] - crop_offset_s)
             try:
@@ -310,7 +326,7 @@ def _process_dspsr(c, event, i_event, n_events, frag, offset_s,
             print("  (no calibration available: saving the UNCALIBRATED fold)")
 
     try:
-        stokes, meta = read_ar_stokes(cal_path)
+        stokes, meta = read_ar_stokes(cal_path, cand_mjd=c['mjd'], seek_mjd=seek_mjd)
     except Exception as e:
         print(f"    FAILED to read {cal_path}: {e}")
         if not args.keep_ar:
