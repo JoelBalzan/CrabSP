@@ -65,7 +65,7 @@ for MODE in "${MODES[@]}"; do
   0.25us)
     ROOT="crab_0.25us"
     TSEARCH=0.00000025
-    MINW=0.00000025
+    MINW=$(awk "BEGIN{printf \"%.10f\", ${TSEARCH} * 2}")
     MAXW=0.000025
     LENGTH=1
     THRE=10
@@ -73,7 +73,7 @@ for MODE in "${MODES[@]}"; do
   0.5us)
     ROOT="crab_0.5us"
     TSEARCH=0.0000005
-    MINW=0.0000005
+    MINW=$(awk "BEGIN{printf \"%.10f\", ${TSEARCH} * 2}")
     MAXW=0.00005
     LENGTH=1
     THRE=10
@@ -81,7 +81,7 @@ for MODE in "${MODES[@]}"; do
   1us)
     ROOT="crab_1us"
     TSEARCH=0.000001
-    MINW=0.000001
+    MINW=$(awk "BEGIN{printf \"%.10f\", ${TSEARCH} * 2}")
     MAXW=0.0001
     LENGTH=1
     THRE=10
@@ -89,7 +89,7 @@ for MODE in "${MODES[@]}"; do
   4us)
     ROOT="crab_4us"
     TSEARCH=0.000004
-    MINW=0.000004
+    MINW=$(awk "BEGIN{printf \"%.10f\", ${TSEARCH} * 2}")
     MAXW=0.0005
     LENGTH=2
     THRE=10
@@ -97,7 +97,7 @@ for MODE in "${MODES[@]}"; do
   5us)
     ROOT="crab_5us"
     TSEARCH=0.000005
-    MINW=0.000005
+    MINW=$(awk "BEGIN{printf \"%.10f\", ${TSEARCH} * 2}")
     MAXW=0.0005
     LENGTH=2
     THRE=10
@@ -105,7 +105,7 @@ for MODE in "${MODES[@]}"; do
   10us)
     ROOT="crab_10us"
     TSEARCH=0.00001
-    MINW=0.00001
+    MINW=$(awk "BEGIN{printf \"%.10f\", ${TSEARCH} * 2}")
     MAXW=0.003
     LENGTH=5
     THRE=10
@@ -113,7 +113,7 @@ for MODE in "${MODES[@]}"; do
   20us)
     ROOT="crab_20us"
     TSEARCH=0.00002
-    MINW=0.00002
+    MINW=$(awk "BEGIN{printf \"%.10f\", ${TSEARCH} * 2}")
     MAXW=0.006
     LENGTH=9.65
     THRE=10
@@ -121,7 +121,7 @@ for MODE in "${MODES[@]}"; do
   40us)
     ROOT="crab_40us"
     TSEARCH=0.00004
-    MINW=0.00004
+    MINW=$(awk "BEGIN{printf \"%.10f\", ${TSEARCH} * 2}")
     MAXW=0.02
     LENGTH=9.65
     THRE=10
@@ -167,7 +167,6 @@ for MODE in "${MODES[@]}"; do
     -t "$(nproc)" \
     --rootname "${ROOT}" \
     --td "${TD}" \
-    --zapthre 3.0 \
     --dms 56.65 \
     --ddm 0.005 \
     --ndm 30 \
@@ -179,12 +178,16 @@ for MODE in "${MODES[@]}"; do
     --snrloss 0.1 \
     -l "${LENGTH}" \
     --drop \
-    --baseline 0 5 \
+    --baseline 0 0.1 \
     --iqr \
-    --widthlimit 0.001 \
     --fill rand \
-    -z kadaneF 8 4 zdot \
-    -r 4 \
+    --fillPatch rand \
+    -z kadaneT 8 1 zdot \
+    --threKadaneT 6 \
+    --bandlimitKT 16 \
+    --threMask 6 \
+    --zapthre 2.0 \
+    -r 3 \
     -k 3 \
     --minpts 3 \
     --maxncand 100 \

@@ -128,7 +128,12 @@ for dir in "${OBS[@]}"; do
       --outdir cutouts \
       --min-snr 5 \
       --digifil-min-block 2.0 \
-      --plot
+      --plot \
+      --fast-pac \
+      --keep-ar \
+      --dm 56.65 \
+      --rm -45 \
+      -F 1 \
   fi
 done
 
