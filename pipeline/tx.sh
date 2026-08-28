@@ -10,6 +10,19 @@
 
 set -euo pipefail
 
+# --- auto-log to file + terminal (tee) so crashes are traceable ---
+# Use LOGFILE env to override; default is timestamped in ./cands/
+LOGFILE="${LOGFILE:-cands/tx_$(date +%Y%m%d_%H%M%S).log}"
+mkdir -p "$(dirname "$LOGFILE")"
+# shellcheck disable=SC2069
+exec > >(tee -a "$LOGFILE") 2>&1
+echo "=== tx.sh started $(date -Iseconds) ==="
+echo "cmd : $0 $*"
+echo "pwd : $PWD"
+echo "log : $LOGFILE (also on terminal via tee)"
+echo
+trap 'echo "=== tx.sh CRASHED at $(date -Iseconds) (mode=${MODE:-?} line=${LINENO}) ==="; echo "last file tried: ${FILES[-1]:-?}"; echo "see $LOGFILE"' ERR
+
 VENV_PYTHON="${VENV_PYTHON:-/home/joel/Documents/GitHub/CrabSP/.venv/bin/python}"
 
 MODE="${1:-}"
