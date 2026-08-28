@@ -162,49 +162,125 @@ for MODE in "${MODES[@]}"; do
 
   root_mjd="$("$VENV_PYTHON" -c "import sys; from sigpyproc.readers import FilReader; print('%.10f' % FilReader(sys.argv[1]).header.tstart)" "${FILES[0]}")"
   cands_file="${ROOT}_${root_mjd}_cfbf00000.cands"
+  # --- resume support: if a previous run crashed, cands_file is partial ---
+  RESUME=0
+  RESUME_FILES=()
   if [[ -s "$cands_file" ]]; then
-    # transientX writes candidates incrementally, so an OOM-killed run can
-    # leave a partial .cands. Only trust it if its LAST candidate's fragment
-    # is this run's final file.
     last_fil=$(tail -1 "$cands_file" | awk -F'\t' '{gsub(/\r/, "", $NF); print $NF}')
     if [[ "$last_fil" == "${FILES[-1]}" ]]; then
       echo "  $cands_file covers ${FILES[-1]##*/}, skipping"
       popd >/dev/null
       continue
     fi
-    echo "  $cands_file incomplete (last cand in ${last_fil##*/}, want ${FILES[-1]##*/}), re-searching"
-    rm -f "$cands_file"
+    # find index of last_fil in FILES (last successfully written file)
+    last_idx=-1
+    for i in "${!FILES[@]}"; do
+      if [[ "${FILES[$i]}" == "$last_fil" ]]; then last_idx=$i; break; fi
+    done
+    if (( last_idx >= 0 )); then
+      if [[ "${FORCE:-0}" == "1" ]]; then
+        echo "  FORCE=1: discarding partial $cands_file (last cand in ${last_fil##*/}) and restarting"
+        rm -f "$cands_file"
+      elif (( last_idx == 0 )); then
+        echo "  $cands_file incomplete but only first file done (${last_fil##*/}) — restarting from scratch"
+        rm -f "$cands_file"
+      else
+        RESUME=1
+        # include last file for overlap; transientx --cont needs the boundary
+        RESUME_FILES=("${FILES[@]:$last_idx}")
+        # what the resume run will write (based on its first file's MJD)
+        resume_root_mjd="$("$VENV_PYTHON" -c "import sys; from sigpyproc.readers import FilReader; print('%.10f' % FilReader(sys.argv[1]).header.tstart)" "${RESUME_FILES[0]}")"
+        resume_cands="${ROOT}_${resume_root_mjd}_cfbf00000.cands"
+        echo "  $cands_file incomplete (last cand in ${last_fil##*/}, want ${FILES[-1]##*/})"
+        echo "  RESUME: ${#RESUME_FILES[@]} files from ${RESUME_FILES[0]##*/} (idx $last_idx) -> $resume_cands"
+        echo "  (fix the problem file — e.g. rfi/blank_fil.py it — then re-run; this will resume)"
+      fi
+    else
+      echo "  $cands_file incomplete but last cand file ${last_fil##*/} not in current file list — restarting"
+      rm -f "$cands_file"
+    fi
   fi
-  echo "  searching ${FILES[0]##*/} .. ${FILES[-1]##*/} (${#FILES[@]} filterbanks, root MJD $root_mjd)"
-  transientx_fil -v \
-    -t "$(nproc)" \
-    --rootname "${ROOT}" \
-    --td "${TD}" \
-    --dms 56.65 \
-    --ddm 0.005 \
-    --ndm 30 \
-    --overlap 0.1 \
-    --cont \
-    --thre "${THRE}" \
-    --minw "${MINW}" \
-    --maxw "${MAXW}" \
-    --snrloss 0.1 \
-    -l "${LENGTH}" \
-    --drop \
-    --baseline 0 0.1 \
-    --iqr \
-    --fill rand \
-    --fillPatch rand \
-    -z kadaneT 8 1 zdot \
-    --threKadaneT 6 \
-    --bandlimitKT 16 \
-    --threMask 6 \
-    --zapthre 2.0 \
-    -r 3 \
-    -k 3 \
-    --minpts 3 \
-    --maxncand 100 \
-    -f "${FILES[@]}"
+
+  if (( RESUME )); then
+    echo "  resuming search ${RESUME_FILES[0]##*/} .. ${RESUME_FILES[-1]##*/} (${#RESUME_FILES[@]} filterbanks, root MJD $resume_root_mjd) -> $resume_cands"
+    transientx_fil -v \
+      -t "$(nproc)" \
+      --rootname "${ROOT}" \
+      --td "${TD}" \
+      --dms 56.65 \
+      --ddm 0.005 \
+      --ndm 30 \
+      --overlap 0.1 \
+      --cont \
+      --thre "${THRE}" \
+      --minw "${MINW}" \
+      --maxw "${MAXW}" \
+      --snrloss 0.1 \
+      -l "${LENGTH}" \
+      --drop \
+      --baseline 0 0.1 \
+      --iqr \
+      --fill rand \
+      --fillPatch rand \
+      -z kadaneT 8 1 zdot \
+      --threKadaneT 6 \
+      --bandlimitKT 16 \
+      --threMask 6 \
+      --zapthre 2.0 \
+      -r 3 \
+      -k 3 \
+      --minpts 3 \
+      --maxncand 100 \
+      -f "${RESUME_FILES[@]}"
+    # merge resume output into the original cands_file
+    if [[ -s "$resume_cands" ]]; then
+      grep -v "^#" "$resume_cands" > "${resume_cands}.nohead" 2>/dev/null || true
+      if head -1 "$cands_file" | grep -q "^#"; then
+        head -1 "$cands_file" > "${cands_file}.merged"
+        grep -v "^#" "$cands_file" >> "${cands_file}.merged"
+      else
+        cat "$cands_file" > "${cands_file}.merged"
+      fi
+      cat "${resume_cands}.nohead" >> "${cands_file}.merged"
+      # de-dupe exact duplicate lines from the overlap file, preserve order
+      awk '!seen[$0]++' "${cands_file}.merged" > "${cands_file}.tmp" && mv "${cands_file}.tmp" "$cands_file"
+      rm -f "${resume_cands}" "${resume_cands}.nohead" "${cands_file}.merged"
+      echo "  merged resume -> $cands_file ($(wc -l < "$cands_file") total cands)"
+    else
+      echo "  WARNING: resume produced no $resume_cands — keeping original partial" >&2
+    fi
+  else
+    echo "  searching ${FILES[0]##*/} .. ${FILES[-1]##*/} (${#FILES[@]} filterbanks, root MJD $root_mjd)"
+    transientx_fil -v \
+      -t "$(nproc)" \
+      --rootname "${ROOT}" \
+      --td "${TD}" \
+      --dms 56.65 \
+      --ddm 0.005 \
+      --ndm 30 \
+      --overlap 0.1 \
+      --cont \
+      --thre "${THRE}" \
+      --minw "${MINW}" \
+      --maxw "${MAXW}" \
+      --snrloss 0.1 \
+      -l "${LENGTH}" \
+      --drop \
+      --baseline 0 0.1 \
+      --iqr \
+      --fill rand \
+      --fillPatch rand \
+      -z kadaneT 8 1 zdot \
+      --threKadaneT 6 \
+      --bandlimitKT 16 \
+      --threMask 6 \
+      --zapthre 2.0 \
+      -r 3 \
+      -k 3 \
+      --minpts 3 \
+      --maxncand 100 \
+      -f "${FILES[@]}"
+  fi
 
   if [[ -s "$cands_file" ]] && (( DO_REPLOT )); then
     # replot_fil divides by the cand width; widths < 0.005 ms get written as
