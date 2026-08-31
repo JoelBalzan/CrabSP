@@ -600,10 +600,12 @@ def _generate_plot(npz_path, outname, outdir, calib_file, cal_db, args):
 	cal_tag = 'calibrated' if cal_applied_now else 'UNCALIBRATED'
 	if args.fast_pac:
 		cal_tag += ', fast'
+	npz_abs = Path(npz_path).resolve()
+	png_abs = Path(png_path).resolve()
 	orig = os.getcwd()
 	try:
-		os.chdir(cands_outdir)
-		generate_profile_plot(npz_path, out=str(png_path),
+		os.chdir(cands_outdir.resolve())
+		generate_profile_plot(str(npz_abs), out=str(png_abs),
 							   title_suffix=f"[{cal_tag}]")
 		print(f"    profile plot -> {png_path}")
 	except Exception as e:
