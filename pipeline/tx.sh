@@ -12,14 +12,16 @@ set -euo pipefail
 
 # --- auto-log to file + terminal (tee) so crashes are traceable ---
 # Use LOGFILE env to override; default is timestamped in ./cands/
+# transientx -v spams `finish X.XX seconds (Y%)` per 0.01s (10× per 0.01s) → 600 MB log;
+# replot spams `time not contiguous` per gap (354 files → 100+ warnings) → also filtered.
 LOGFILE="${LOGFILE:-cands/tx_$(date +%Y%m%d_%H%M%S).log}"
 mkdir -p "$(dirname "$LOGFILE")"
 # shellcheck disable=SC2069
-exec > >(tee -a "$LOGFILE") 2>&1
+exec > >(stdbuf -oL sed -u 's/\r/\n/g' | grep -v "^finish" | grep -v "^Maximum width" | grep -v "YMW16_DIR" | grep -v "time not contiguous" | tee -a "$LOGFILE") 2>&1
 echo "=== tx.sh started $(date -Iseconds) ==="
 echo "cmd : $0 $*"
 echo "pwd : $PWD"
-echo "log : $LOGFILE (also on terminal via tee)"
+echo "log : $LOGFILE (also on terminal via tee, filtered \\r -> \\n)"
 echo
 trap 'echo "=== tx.sh CRASHED at $(date -Iseconds) (mode=${MODE:-?} line=${LINENO}) ==="; echo "last file tried: ${FILES[-1]:-?}"; echo "see $LOGFILE"' ERR
 
@@ -28,7 +30,7 @@ VENV_PYTHON="${VENV_PYTHON:-/home/joel/Documents/GitHub/CrabSP/.venv/bin/python}
 MODE="${1:-}"
 
 if [[ "$MODE" == "all" ]]; then
-  MODES=(0.25us 0.5us 1us 5us)
+  MODES=(0.5us 1us 5us)
 elif [[ -n "$MODE" ]]; then
   MODES=("$MODE")
 else
@@ -37,8 +39,8 @@ else
 fi
 
 DO_REPLOT=${DO_REPLOT:-1}
-REPLOT_DM_CUTOFF=${REPLOT_DM_CUTOFF:-0}
-REPLOT_DDM_CUTOFF=${REPLOT_DDM_CUTOFF:-10}
+REPLOT_DM_CUTOFF=${REPLOT_DM_CUTOFF:-15}
+REPLOT_DDM_CUTOFF=${REPLOT_DDM_CUTOFF:-0}
 REPLOT_SNRCUTOFF=${REPLOT_SNRCUTOFF:-0}
 REPLOT_WIDTHCUTOFF=${REPLOT_WIDTHCUTOFF:-0}
 
@@ -141,11 +143,12 @@ for MODE in "${MODES[@]}"; do
     ;;
   esac
 
-  TD="$("$VENV_PYTHON" -c "import sys; print(max(1, round(float(sys.argv[1]) / float(sys.argv[2]))))" "$TSEARCH" "$input_tsamp")"
-
-  if "$VENV_PYTHON" -c "import sys; sys.exit(int(float(sys.argv[1]) > float(sys.argv[2])))" "$input_tsamp" "$TSEARCH"; then
-    echo "  WARNING: input tsamp ${input_tsamp} s is coarser than the ${TSEARCH} s requested by ${MODE}; will search at input resolution (td=1)" >&2
+  # td = TSEARCH / input_tsamp must be >=1 — can't search finer than native
+  if "$VENV_PYTHON" -c "import sys; sys.exit(0 if float(sys.argv[1]) > float(sys.argv[2]) else 1)" "$input_tsamp" "$TSEARCH"; then
+    echo "  SKIP $MODE: requested ${TSEARCH}s < native ${input_tsamp}s (td<1, would need upsampling) — skipping" >&2
+    continue
   fi
+  TD="$("$VENV_PYTHON" -c "import sys; print(max(1, round(float(sys.argv[1]) / float(sys.argv[2]))))" "$TSEARCH" "$input_tsamp")"
 
   OUTDIR="cands/$MODE"
   echo
@@ -291,7 +294,7 @@ for MODE in "${MODES[@]}"; do
     awk -F'\t' -v mw="$MIN_WIDTH_MS" 'BEGIN{OFS="\t"} $5=="0.00" {$5=mw} {print}' \
       "$cands_file" > "${cands_file}.tmp" && mv "${cands_file}.tmp" "$cands_file"
 
-    echo "  running replot_fil -c (dmcutoff=$REPLOT_DM_CUTOFF ddcutoff=$REPLOT_DDM_CUTOFF snrcutoff=$REPLOT_SNRCUTOFF widthcutoff=$REPLOT_WIDTHCUTOFF)"
+    echo "  running replot_fil -c (dmcutoff=$REPLOT_DM_CUTOFF ddcutoff=$REPLOT_DDM_CUTOFF snrcutoff=$REPLOT_SNRCUTOFF widthcutoff=$REPLOT_WIDTHCUTOFF --zdot)"
     BEFORE=$(wc -l < "$cands_file")
     replot_fil -f "${FILES[@]}" \
       --candfile "$cands_file" \
@@ -301,7 +304,16 @@ for MODE in "${MODES[@]}"; do
       --ddmcutoff "$REPLOT_DDM_CUTOFF" \
       --snrcutoff "$REPLOT_SNRCUTOFF" \
       --widthcutoff "$REPLOT_WIDTHCUTOFF" \
+      --zdot \
       -t "$(nproc)"
+    # replot -c writes to *_replot.cands, not in-place — move it back
+    replot_out="${cands_file%.cands}_replot.cands"
+    if [[ -f "$replot_out" ]]; then
+      mv "$replot_out" "$cands_file"
+      # also move the json sidecar if present
+      replot_json="${cands_file%.cands}_replot.json"
+      [[ -f "$replot_json" ]] && mv "$replot_json" "${cands_file%.cands}.json"
+    fi
     AFTER=$(wc -l < "$cands_file")
     echo "  cands: $BEFORE -> $AFTER after replot_fil"
   elif [[ -s "$cands_file" ]]; then
