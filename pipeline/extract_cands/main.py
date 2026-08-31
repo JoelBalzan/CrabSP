@@ -75,10 +75,14 @@ def main():
 					 help='number of spin periods to fold per candidate')
 	ap.add_argument('--keep-ar', action='store_true',
 					 help='keep the intermediate .ar/.calib archives')
-	ap.add_argument('--fast-pac', action='store_true',
-					 help='crop input .dada before folding for speed')
+	ap.add_argument('--fast-pac', dest='fast_pac', action='store_true', default=True,
+					 help='crop input .dada before folding for speed (default: on)')
+	ap.add_argument('--no-fast-pac', dest='fast_pac', action='store_false',
+					 help='disable fast-pac cropping')
 	ap.add_argument('--fast-min-crop-s', type=float, default=0.35,
 					 help='minimum crop duration (s) for --fast-pac')
+	ap.add_argument('--mode', default='crab',
+					 help='pipeline mode (crab=fast-pac + dspsr, kept for compat; default crab)')
 	ap.add_argument('--rm', type=float, default=None,
 					 help='rotation measure for coherent Faraday correction')
 	ap.add_argument('--dm', type=float, default=None,
@@ -146,7 +150,11 @@ def main():
 
 		tx_res = get_tx_resolution(cand_file)
 
-		outdir = base_outdir / tx_res
+		# avoid cands/cands or cutouts/cands for merged files (unique.cands)
+		if tx_res in (base_outdir.name, "cands"):
+			outdir = base_outdir
+		else:
+			outdir = base_outdir / tx_res
 		outdir.mkdir(parents=True, exist_ok=True)
 
 		print(f"TX resolution: {tx_res}")
@@ -582,15 +590,26 @@ def _process_digifil(c, event, i_event, n_events, frag, offset_s,
 def _generate_plot(npz_path, outname, outdir, calib_file, cal_db, args):
 	"""Generate polarimetric profile plot."""
 	from plotting.plot_iquv_profile import generate_profile_plot
+	import os
 
-	png_path = outdir / f"{outname}_iquv_profile.png"
+	# PNGs requested in cands/<mode>/ (not cutouts) per user — cd there and run
+	cands_outdir = Path(str(outdir).replace("cutouts", "cands", 1)) if "cutouts" in str(outdir) else outdir
+	cands_outdir.mkdir(parents=True, exist_ok=True)
+	png_path = cands_outdir / f"{outname}_iquv_profile.png"
 	cal_applied_now = bool(calib_file or cal_db)
 	cal_tag = 'calibrated' if cal_applied_now else 'UNCALIBRATED'
 	if args.fast_pac:
 		cal_tag += ', fast'
+	orig = os.getcwd()
 	try:
+		os.chdir(cands_outdir)
 		generate_profile_plot(npz_path, out=str(png_path),
 							   title_suffix=f"[{cal_tag}]")
 		print(f"    profile plot -> {png_path}")
 	except Exception as e:
 		print(f"    plot FAILED: {e}")
+	finally:
+		try:
+			os.chdir(orig)
+		except Exception:
+			pass
