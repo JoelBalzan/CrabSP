@@ -8,18 +8,19 @@ The workflow has two stages:
 1. **Search** (`tx.sh`) — run [transientX](https://github.com/ypmen/TransientX)
    boxcar searches at multiple time resolutions over dedispersed filterbanks.
 2. **Extract** (`extract_cands.py`) — match the resulting candidates to the raw
-   `.dada` baseband fragments, form full-Stokes cutouts on the fly with
-   `digifil` (from [dspsr](http://dspsr.sourceforge.net/)), convert the
-   coherency products to IQUV, and save each pulse as a `.npz` cube.
+   `.dada` baseband fragments, coherently dedisperse and **fold** each burst with
+   `dspsr`, calibrate the folded archive with `pac` (flat SingleAxis model), and
+   save a full-Stokes `.npz` cube plus a polarimetric PNG per candidate.
 
 ## Requirements
 
 - [transientX](https://github.com/ypmen/TransientX) (`transientx_fil`)
-- [dspsr](http://dspsr.sourceforge.net/) (`digifil`)
+- [dspsr](http://dspsr.sourceforge.net/) (`dspsr`) with psrchive (`pac`, `pam`,
+  `psredit`)
 - Python ≥ 3.6 with:
   - [`sigpyproc3`](https://github.com/FRBers/sigpyproc3)
   - `numpy`
-  - `matplotlib` (only for `--plot` and `plot_fil.py`)
+  - `matplotlib` (for the diagnostic PNGs)
 
 ## Stage 1 — single-pulse search (`tx.sh`)
 
@@ -43,8 +44,8 @@ filterbank. Each line holds:
 
 ## Stage 2 — candidate extraction (`extract_cands.py`)
 
-Match each candidate to the correct raw `.dada` fragment and save a
-full-Stokes cutout of the pulse.
+Match each candidate to the correct raw `.dada` fragment, fold it, calibrate it,
+and save the burst's Stokes profile.
 
 ```bash
 python3 extract_cands.py \
@@ -52,7 +53,10 @@ python3 extract_cands.py \
     --workdir /path/to/raw/dada/dir \
     --outdir cutouts \
     --min-snr 5 \
-    --plot
+    --keep-ar \
+    --dm 56.65 \
+    --rm -45 \
+    -F 1
 ```
 
 ### How it works
@@ -63,22 +67,22 @@ python3 extract_cands.py \
 2. **MJD matching** — each candidate's MJD is matched to the fragment that
    contains it (with a 10 ms tolerance).
 3. **Event clustering** — candidates are grouped into events on the MJD axis
-   (gap `--cluster-gap-ms`, default 3 ms ≈ the Crab main-pulse window; rotations
-   are 33.4 ms apart). Each event yields one cutout, centred on the highest-SNR
-   detection, with a fixed `--window-s` (default 6 ms).
-4. **digifil extraction** — forming a filterbank on the fly from voltages
-   (with `-F`, see [time resolution](#time-resolution-digifil-fft)) discards
-   FFT settle/edge regions, so very short requests return
-   zero samples. To work around this a block of at least `--digifil-min-block`
-   (default 6 s) is requested centred on the pulse, with full coherency
-   products (`-d 4`), coherent dedispersion at the candidate DM (`-D ... -K`),
-   float output (`-b -32`), and no rescaling (`-I 0`).
-5. **Coherency → Stokes** — the cutout (AA, BB, CR, CI) is converted to
-   **I, Q, U, V** via `I=AA+BB, Q=AA−BB, U=2CR, V=2CI`.
-6. **Trimming** — the large block is trimmed client-side to the desired window
-   around the candidate MJD.
-7. **Save** — the trimmed cube is written as `cand<id>_<mjd>_dm<dm>_iquv.npz`
-   along with the timing/frequency axes and candidate metadata.
+   (gap `--cluster-gap-ms`, default 0 = no clustering). Each event yields one
+   fold centred on the highest-SNR detection, with a fixed `--window-s`
+   (default 3 ms).
+4. **Fast-pac folding** — the raw fragment is cropped to a short window around
+   the pulse (a pre-roll covers dspsr's overlap-save history), then `dspsr`
+   coherently dedisperses (`-D -K`) and folds one spin period (`-b nbin`,
+   `-F nchan`, coherency products `-d 4`) anchored so the burst lands in the
+   first phase bins. `--rm` applies coherent Faraday derotation.
+5. **Calibration** — `pac` is applied with a flat SingleAxis model
+   (`--pac-flags -F -b -c -T`) against a grid-matched calibration database
+   that is auto-generated/auto-scrunched from the native PolnCal (see
+   `cal.md`).
+6. **Trim + save** — the trimmed Stokes block is written as
+   `cand<id>_<mjd>_dm<dm>_iquv.npz` along with the timing/frequency axes and
+   candidate metadata, and (by default) a polarimetric profile PNG per
+   candidate.
 
 ### Output
 
@@ -91,85 +95,69 @@ Each `.npz` contains:
 | `cand_id`, `cand_mjd`, `cand_dm`, `cand_width_ms`, `cand_snr` | candidate parameters |
 | `source_dada`    | raw `.dada` fragment the pulse came from              |
 | `tstart_mjd`     | MJD of the first sample of the trimmed cube           |
-| `tsamp_s`        | sampling interval (s)                                 |
+| `tsamp_s`        | sampling interval (s) = fold period / nbin            |
 | `nsamp`          | samples along the time axis                           |
 | `fch1_mhz`, `foff_mhz`, `nchan` | frequency axis                    |
 | `window_s`       | requested cutout window (s)                           |
-| `digifil_seek_s`, `digifil_dur_s` | digifil block actually requested   |
+| `fold_seek_mjd`, `fold_period`, `fold_nbin`, `fold_nchan` | fold geometry |
+| `method`         | `dspsr-fast-cropped`                                  |
+| `calib_applied`, `calib_file`, `pac_flags` | calibration provenance    |
+| `rm`             | rotation measure used (NaN if none)                   |
 
-`--plot` additionally writes a diagnostic PNG per candidate (full-Stokes profile,
-bandpass-subtracted Stokes-I dynamic spectrum plus Q/U/V time series), scrunched
-to the search resolution of the candidate file. `--plot-no-tscrunch` keeps the
-native extracted resolution instead.
+A diagnostic PNG (`*_iquv_profile.png`) is written per candidate by default;
+pass `--no-plot` to disable.
 
 ### Options
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--cand-dir DIR` | — | recursively find `*.cands` under DIR (alternative to `--cand_files`) |
-| `--cand_files F...` | — | explicit `.cands` files |
+| `--cand-dir DIR` | — | recursively find `*.cands` under DIR (alternative to `--cand-files`) |
+| `--cand-files F...` | — | explicit `.cands` files |
 | `--workdir DIR` | `.` | directory containing `*.dada` + matching `*.dada.fil` |
 | `--outdir DIR` | `cutouts` | output directory (per-resolution subdirs created) |
 | `--min-snr S` | `0.0` | drop candidates below this S/N |
-| `--cluster-gap-ms M` | `3.0` | MJD gap that separates one pulse event from the next (ms) |
-| `--window-s S` | `0.006` | fixed cutout window (s), centred on the burst |
-| `--digifil-min-block S` | `6.0` | min duration to request from digifil (see note above) |
-| `--digifil-bin` | `digifil` | path to the digifil binary |
-| `--digifil-fft` | `32` | digifil `-F`, number of channels; sets cutout time resolution (see below) |
-| `--plot-tscrunch-us US` | search res | override the diagnostic-PNG time scrunch (µs) |
-| `--plot-no-tscrunch` | off | plot PNGs at the native extracted resolution |
-| `--keep-fil` | off | keep the intermediate `.fil` cutout |
-| `--plot` | off | write a diagnostic PNG per candidate |
-
-### Time resolution (`--digifil-fft`)
-
-The cutout time resolution is set by digifil's FFT factor `-F`. For the 32 MHz
-band used in `tx.sh`, `-F 32` produces 32 × 1 MHz channels at 1 µs raw `dt`.
-Increase `-F` (64, 128, …) for finer time resolution:
-
-```bash
-python3 extract_cands.py --cand-dir cands --workdir . --digifil-fft 128 --plot
-```
-
-This is independent of the transientX search resolution (which only sets the
-window sizes and the default plot scrunch); the saved `.npz` metadata and the
-plotting always follow the header of the actual cutout. Use
-`--plot-no-tscrunch` to view the finer native resolution in the diagnostic PNGs.
-
-## Helper — `plot_fil.py`
-
-Quick look at a filterbank: dynamic spectrum (bandpass-subtracted) and total
-power profile. --ts 4 = 
-
-```bash
-python3 plot_fil.py cutouts/cand123_..._iquv.fil --ts 4
-```
+| `--cluster-gap-ms M` | `0.0` | MJD gap that separates one pulse event from the next (ms); 0 = no clustering |
+| `--window-s S` | `0.003` | fixed cutout window (s), centred on the burst |
+| `-F N, --nchan N` | `8` | dspsr `-F` folding channels |
+| `--fold-period P` | `0.0334` | fold period (s), passed to dspsr `-c` |
+| `--rm RM` | — | rotation measure for coherent Faraday derotation |
+| `--dm DM` | — | override DM (pc/cm³) for all candidates |
+| `--keep-ar` | off | keep the intermediate `.ar`/`.calib` archives |
+| `--no-plot` | off | disable the diagnostic PNG per candidate (plot is on by default) |
+| `--calib FILE` | — | pac calibration model (`pac -A`) |
+| `--calib-db FILE` | — | pac calibration database (`pac -d`) |
+| `--cal-dir DIR` | `--workdir` | directory holding calibration material |
+| `--cal-db-name NAME` | `database.txt` | auto-detected/generated calibration database name |
+| `--no-cal` | off | disable automatic pac calibration |
+| `--pac-flags FLAGS` | `-F -b -c -T` | flags passed to every pac step |
 
 ## Typical workflow
 
 ```bash
-# 1. Baseband -> searchable filterbanks (dspsr; per fragment, e.g.)
-digifil -F 32 -d 2 -D 56.65 -K -b 8 -o crab.fil crab.dada
+# 1. Baseband -> searchable filterbanks (digifil; per fragment, e.g.)
+digifil -F 16 -d 1 -b 8 -I 0 -o crab.fil crab.dada
 
 # 2. Search single pulses at several time resolutions
 ./tx.sh all
 
-# 3. Extract full-Stokes cutouts of every detection
+# 3. Fold + calibrate + extract full-Stokes cutouts of every detection
 python3 extract_cands.py --cand-dir cands --workdir . --outdir cutouts \
-    --min-snr 5 --plot
+    --min-snr 5 --dm 56.65 --rm -45 -F 1
 ```
+
+`pipeline/run_pipeline.sh` automates all three steps for a list of observation
+directories (stage toggles `DO_FIL`/`DO_SEARCH`/`DO_EXTRACT`).
 
 ## Notes / caveats
 
 - The candidate MJD is in **UTC**; the fragment `.fil` headers must use the
   same clock, otherwise candidates will not match a fragment.
-- `digifil` refuses to overwrite existing files, so stale cutouts are deleted
-  before extraction.
-- Duplicate candidates (same source fragment and offset) are skipped.
+- The folded archive is anchored with `-seek`/`-cepoch` so phase 0 = the
+  candidate MJD; dspsr's overlap-save filter needs ~131 ms of pre-roll history,
+  which the fast-pac crop provides.
 - `extract_cands.py` performs a sanity check on the trimmed cube: the fraction
-  of negative Stokes-I samples (`I = AA + BB`) should be near zero. A large
-  negative fraction indicates the pol-axis reshape is wrong — inspect the cube
-  by hand.
+  of negative Stokes-I samples should be near zero. A large negative fraction
+  indicates a pol-axis/coherency reshape problem — inspect the cube by hand.
 
 ## License
 

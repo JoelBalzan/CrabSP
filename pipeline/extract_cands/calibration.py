@@ -300,7 +300,6 @@ def resolve_calibration(args, cal_dir, fold_bw_mhz=0.0,
         scrunched_db, scrunch_note = auto_scrunch_cal(
             db_path, args.nchan, cal_dir,
             fold_bw_mhz=fold_bw_mhz, fold_center_mhz=fold_center_mhz,
-            pam_bin=args.pam_bin, pac_bin=args.pac_bin,
             pac_flags=args.pac_flags)
         if scrunched_db is None:
             return (None, None,
@@ -309,13 +308,12 @@ def resolve_calibration(args, cal_dir, fold_bw_mhz=0.0,
     if args.calib_db:
         return (None, None,
                 f"WARNING: --calib-db {db_path} not found — saving UNCALIBRATED folds")
-    db_path, note = build_cal_database(cal_dir, db_path, args.pac_bin, args.pac_flags)
+    db_path, note = build_cal_database(cal_dir, db_path, pac_flags=args.pac_flags)
     if db_path is None:
         return None, None, f"WARNING: {note} — saving UNCALIBRATED folds"
     scrunched_db, scrunch_note = auto_scrunch_cal(
         db_path, args.nchan, cal_dir,
         fold_bw_mhz=fold_bw_mhz, fold_center_mhz=fold_center_mhz,
-        pam_bin=args.pam_bin, pac_bin=args.pac_bin,
         pac_flags=args.pac_flags)
     if scrunched_db is None:
         return (None, None,

@@ -127,13 +127,10 @@ for dir in "${OBS[@]}"; do
       --workdir "$PWD" \
       --outdir cutouts \
       --min-snr 5 \
-      --digifil-min-block 2.0 \
-      --plot \
-      --fast-pac \
       --keep-ar \
       --dm 56.65 \
       --rm -45 \
-      -F 1 \
+      -F 1
   fi
 done
 
