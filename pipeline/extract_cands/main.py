@@ -592,10 +592,8 @@ def _generate_plot(npz_path, outname, outdir, calib_file, cal_db, args):
 	from plotting.plot_iquv_profile import generate_profile_plot
 	import os
 
-	# PNGs requested in cands/<mode>/ (not cutouts) per user — cd there and run
-	cands_outdir = Path(str(outdir).replace("cutouts", "cands", 1)) if "cutouts" in str(outdir) else outdir
-	cands_outdir.mkdir(parents=True, exist_ok=True)
-	png_path = cands_outdir / f"{outname}_iquv_profile.png"
+	outdir.mkdir(parents=True, exist_ok=True)
+	png_path = outdir / f"{outname}_iquv_profile.png"
 	cal_applied_now = bool(calib_file or cal_db)
 	cal_tag = 'calibrated' if cal_applied_now else 'UNCALIBRATED'
 	if args.fast_pac:
@@ -604,7 +602,7 @@ def _generate_plot(npz_path, outname, outdir, calib_file, cal_db, args):
 	png_abs = Path(png_path).resolve()
 	orig = os.getcwd()
 	try:
-		os.chdir(cands_outdir.resolve())
+		os.chdir(outdir.resolve())
 		generate_profile_plot(str(npz_abs), out=str(png_abs),
 							   title_suffix=f"[{cal_tag}]")
 		print(f"    profile plot -> {png_path}")
