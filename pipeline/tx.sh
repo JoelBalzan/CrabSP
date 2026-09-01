@@ -300,10 +300,8 @@ for MODE in "${MODES[@]}"; do
       --candfile "$cands_file" \
       -c \
       --cont \
+      --dm 56.7 \
       --dmcutoff "$REPLOT_DM_CUTOFF" \
-      --ddmcutoff "$REPLOT_DDM_CUTOFF" \
-      --snrcutoff "$REPLOT_SNRCUTOFF" \
-      --widthcutoff "$REPLOT_WIDTHCUTOFF" \
       --zdot \
       -t "$(nproc)"
     # replot -c writes to *_replot.cands, not in-place — move it back
@@ -313,6 +311,9 @@ for MODE in "${MODES[@]}"; do
       # also move the json sidecar if present
       replot_json="${cands_file%.cands}_replot.json"
       [[ -f "$replot_json" ]] && mv "$replot_json" "${cands_file%.cands}.json"
+      # replot_fil doesn't always update the DM column — force it to the override value
+      awk -F'\t' -v dm="56.7" 'BEGIN{OFS="\t"} {$4=dm} {print}' \
+        "$cands_file" > "${cands_file}.tmp" && mv "${cands_file}.tmp" "$cands_file"
     fi
     AFTER=$(wc -l < "$cands_file")
     echo "  cands: $BEFORE -> $AFTER after replot_fil"

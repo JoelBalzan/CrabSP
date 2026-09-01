@@ -109,6 +109,9 @@ for MODE in "${MODES[@]}"; do
       mv "$replot_out" "$cands_base"
       replot_json="${cands_base%.cands}_replot.json"
       [[ -f "$replot_json" ]] && mv "$replot_json" "${cands_base%.cands}.json"
+      # replot_fil doesn't always update the DM column — force it to the override value
+      awk -F'\t' -v dm="56.7" 'BEGIN{OFS="\t"} {$4=dm} {print}' \
+        "$cands_base" > "${cands_base}.tmp" && mv "${cands_base}.tmp" "$cands_base"
     fi
     AFTER=$(wc -l < "$cands_base")
     echo "  cands: $BEFORE -> $AFTER after replot_fil"
