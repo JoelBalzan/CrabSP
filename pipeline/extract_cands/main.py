@@ -56,7 +56,7 @@ def main():
 					 help='name of auto-detected/generated calibration database')
 	ap.add_argument('--no-cal', action='store_true',
 					 help='disable automatic pac calibration')
-	ap.add_argument('--pac-flags', default='-F -b -T -a',
+	ap.add_argument('--pac-flags', default='-F -b -c -T',
 					 help='extra flags for the pac steps')
 	ap.add_argument('--fold-cf-offset', type=float, default=0.0,
 					 help='shift (MHz) of the fold centre frequency for pac alignment')
@@ -431,7 +431,7 @@ def _calibrate_archive(ar_path, calib_file, cal_db, args, fold_bw_mhz):
 					  pam_bin=args.pam_bin,
 					  psredit_bin=args.psredit_bin)
 	log_archive_info(ar_path, "after fscrunch")
-	if cal_db:
+	if cal_db and '-a' in args.pac_flags.split():
 		_cal_dzts = list(Path(cal_db).parent.glob('*.dzT'))
 		if _cal_dzts:
 			fix_archive_frequencies(ar_path, _cal_dzts[0], args.nchan)
