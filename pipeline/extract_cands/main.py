@@ -150,14 +150,14 @@ def main():
 				print(f"  cand {c['cand_id']} mjd={c['mjd']:.9f}: NO fragment contains this MJD")
 				continue
 
-			_process_dspsr(c, event, i_event, n_events, frag, offset_s,
-						   frags, stream_root, args, calib_file, cal_db,
-						   base_outdir, outdir, fold_bw_mhz)
+			_process_dspsr(c, event, i_event, n_events, frag,
+						   frags, args, calib_file, cal_db,
+						   outdir, fold_bw_mhz, fold_center_mhz)
 
 
-def _process_dspsr(c, event, i_event, n_events, frag, offset_s,
-				   frags, stream_root, args, calib_file, cal_db,
-				   base_outdir, outdir, fold_bw_mhz):
+def _process_dspsr(c, event, i_event, n_events, frag,
+				   frags, args, calib_file, cal_db,
+				   outdir, fold_bw_mhz, fold_center_mhz):
 	"""Handle the dspsr folding route for a single candidate event."""
 	window_s = args.window_s
 	period = args.fold_period
@@ -197,14 +197,14 @@ def _process_dspsr(c, event, i_event, n_events, frag, offset_s,
 	fold_dada_paths = dada_paths
 	tmp_cropped = None
 	if len(dada_paths) == 1:
-		# Coherent dedispersion needs history before the fold epoch.
-		# dspsr's overlap-save filter is ~131 ms at 32 Msps (nfft=4194304)
-		# plus ~tens of ms of dispersive sweep at low frequency, so
-		# starting the cropped file exactly at seek_mjd leaves the first
-		# ~100 ms of the fold corrupted / truncated (subint 0 short, burst
-		# appears in the next subint and is missed when we keep subint 0).
-		# Include a pre-roll before seek; clamp to the fragment start.
-		_prepad_s = 0.25  # enough for 131 ms filter + DM sweep anywhere in UWL
+		# Coherent dedispersion needs filter history before the fold epoch.
+		# The overlap-save transform is now the dispersion-optimal length
+		# (optimal_nfft; <= ~0.3 ms over plausible configs), so a few ms of
+		# pre-roll is ample. Starting exactly at seek_mjd would leave the
+		# first subint corrupted (burst missed when we keep subint 0).
+		# Clamp to the fragment start.
+		_prepad_s = 0.004  # >> any transform length; was 0.25 s for the old
+						  # 131 ms (4.2M-sample) heuristic FFT
 		seek_offset_s = (seek_mjd - frag['tstart_mjd']) * 86400.0
 		desired_start_s = seek_offset_s - _prepad_s
 		if desired_start_s < 0.0:
@@ -234,7 +234,7 @@ def _process_dspsr(c, event, i_event, n_events, frag, offset_s,
 		fold_dada_paths, seek_mjd, c['dm'], period,
 		args.fold_nbin, args.nchan,
 		outname, outdir,
-		rm=args.rm)
+		rm=args.rm, bw_mhz=fold_bw_mhz, center_mhz=fold_center_mhz)
 	if tmp_cropped is not None:
 		tmp_cropped.unlink(missing_ok=True)
 	if ar_path is None:
@@ -330,7 +330,7 @@ def _process_dspsr(c, event, i_event, n_events, frag, offset_s,
 
 	if args.plot:
 		_generate_plot(npz_path, outname, outdir,
-					   calib_file, cal_db, args)
+					   calib_file, cal_db)
 
 	if not args.keep_ar:
 		ar_path.unlink(missing_ok=True)
@@ -355,7 +355,7 @@ def _calibrate_archive(ar_path, calib_file, cal_db, args, fold_bw_mhz):
 	return cal_path
 
 
-def _generate_plot(npz_path, outname, outdir, calib_file, cal_db, args):
+def _generate_plot(npz_path, outname, outdir, calib_file, cal_db):
 	"""Generate polarimetric profile plot."""
 	from plotting.plot_iquv_profile import generate_profile_plot
 	import os

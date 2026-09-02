@@ -4,6 +4,36 @@ from pathlib import Path
 
 import numpy as np
 
+_OPTIMAL_NFFT_OVERSAMPLE = 2.0
+_OPTIMAL_NFFT_MIN = 1024
+
+
+def optimal_nfft(dm, bw_mhz, center_mhz, nchan):
+    """Coherent-dedispersion FFT length for one output channel.
+
+    The dspsr dedispersion filter must cover the dispersive sweep across a
+    single channel of the fold band, and residual smearing per FFT bin kept
+    below half an output sample (i.e. Nyquist-sampled output).  Both criteria
+    reduce to ~2x the sweep, measured in samples at the per-channel rate.
+
+    Returns the next power of two >= 2 * sweep_samples, or None if the
+    inputs are insufficient to compute it.
+    """
+    if dm <= 0 or bw_mhz <= 0 or center_mhz <= 0 or nchan <= 0:
+        return None
+    chan_bw_mhz = bw_mhz / nchan
+    f_lo_ghz = (center_mhz - chan_bw_mhz / 2.0) / 1e3
+    f_hi_ghz = (center_mhz + chan_bw_mhz / 2.0) / 1e3
+    if f_lo_ghz <= 0:
+        return None
+    sweep_s = (4.148808e-3 * dm * (1 / f_lo_ghz**2 - 1 / f_hi_ghz**2)
+               / 1e3)
+    sweep_samples = sweep_s * chan_bw_mhz * 1e6
+    nfft = _OPTIMAL_NFFT_MIN
+    while nfft < _OPTIMAL_NFFT_OVERSAMPLE * sweep_samples:
+        nfft <<= 1
+    return nfft
+
 
 def plan_dspsr_fold(frags, cand_mjd, margin_s, period):
     """Covering fragments + seek MJD for a one-turn dspsr fold.
@@ -33,13 +63,15 @@ def plan_dspsr_fold(frags, cand_mjd, margin_s, period):
 
 
 def fold_cutout(dada_paths, seek_mjd, dm, period, nbin, nchan, outname,
-                outdir, rm=None):
+                outdir, rm=None, bw_mhz=0.0, center_mhz=0.0):
     """Fold one spin period of coherency products around the pulse -> .ar file.
 
     -seek anchors the output at the candidate's MJD; -cepoch makes that the
     phase-0 reference so the burst lands in the first bins.  -D -K dedisperse;
     -d 4 requests PP,QQ,Re[PQ],Im[PQ] coherency products.  rm enables coherent
-    Faraday derotation.
+    Faraday derotation.  -x sets the dedispersion FFT to the optimal length
+    derived from DM / per-channel bandwidth / centre frequency, so the folded
+    profile is Nyquist-sampled with minimum filter history.
 
     Returns the output .ar Path, or None on failure.
     """
@@ -62,14 +94,15 @@ def fold_cutout(dada_paths, seek_mjd, dm, period, nbin, nchan, outname,
         '-e', 'ar',
         '-O', str(outdir / outname),
     ]
-    if nbin > 32768:
-        nfft = 1
-        while nfft < 2 * nbin:
-            nfft <<= 1
+    nfft = optimal_nfft(dm, bw_mhz, center_mhz, nchan)
+    if nfft is not None:
         cmd += ['-x', str(nfft)]
         min_samples = 2 * nfft * nchan
         min_ram_mb = max(512, int(np.ceil(min_samples * 128 / 1e6)))
         cmd += ['-U', str(min_ram_mb)]
+        print(f"\nOptimal dedispersion FFT length: -x {nfft} "
+              f"({nfft / (bw_mhz * 1e6) * 1e3:.2f} ms at "
+              f"{bw_mhz:.1f} MHz / {nchan} ch)")
     if rm is not None:
         cmd += ['-derotate', '-rm', f'{rm:.6f}']
     if len(dada_paths) > 1:
